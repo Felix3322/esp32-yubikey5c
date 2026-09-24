@@ -182,6 +182,17 @@ def test_legacy_store_is_migrated(tmp_path, pcscd, emulators):
     # earlier emulator builds bound their store to a fixed stand-in eFuse key
     assert "legacy root key" in log
     new.restart()
+    # The legacy firmware had locked the device key with the PIN (format
+    # 0x02); verifying the PIN above converted it, so after a restart an
+    # assertion that needs only user presence works without the PIN.
+    dev, c = ctap2()
+    try:
+        cdh = os.urandom(32)
+        a = c.get_assertion("example.com", cdh)
+        rk.auth_data.credential_data.public_key.verify(bytes(a.auth_data) + cdh, a.signature)
+        assert not a.auth_data.is_user_verified()
+    finally:
+        dev.close()
     new.stop()
     with open(new.log_path) as f:
         assert f.read().count("migrating the legacy store") == 1
