@@ -7,6 +7,8 @@ CONFIG_TINYUSB=y
 CONFIG_TINYUSB_TASK_STACK_SIZE=16384
 
 CONFIG_PARTITION_TABLE_CUSTOM=y
+# A/B firmware update: an image that is not confirmed is rolled back.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="config/esp32/partitions_librefido_16mb.csv"
 CONFIG_PARTITION_TABLE_FILENAME="config/esp32/partitions_librefido_16mb.csv"
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
