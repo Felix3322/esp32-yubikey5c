@@ -47,3 +47,4 @@ dependencies.lock
 __pycache__/
 *.pyc
 build-emu/
+*.egg-info/

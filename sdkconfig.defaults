@@ -55,4 +55,8 @@ CONFIG_MBEDTLS_TLS_DISABLED=y
 # CONFIG_ESP_WIFI_ENABLE_WPA3_SAE is not set
 # CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA is not set
 
-CONFIG_ESP_COREDUMP_ENABLE_TO_UART=y
+# No core dumps: a dump of RAM can contain keys (docs/SECURITY_ARCHITECTURE.md).
+CONFIG_ESP_COREDUMP_ENABLE_TO_NONE=y
+
+# Storage bring-up (journaled commits, RS parity) runs on the main task.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
