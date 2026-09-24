@@ -151,8 +151,24 @@ EN = {
 
 gui_policy.install_translations(ZH, EN)
 
-_LANG_ZH = (locale.getlocale()[0] or os.environ.get("LANG", "")).lower().startswith("zh") or \
-    os.environ.get("LIBREFIDO_LANG", "").lower().startswith("zh")
+def _chinese_ui():
+    """LIBREFIDO_LANG=zh|en wins; otherwise the system UI language. Qt's
+    locale name is the reliable one: on Windows, Python reports names such
+    as 'Chinese (Simplified)_China' instead of 'zh_CN'."""
+    forced = os.environ.get("LIBREFIDO_LANG", "").strip().lower()
+    if forced:
+        return forced.startswith("zh")
+    try:
+        from PySide6.QtCore import QLocale
+        if QLocale.system().name().lower().startswith("zh"):
+            return True
+    except Exception:
+        pass
+    name = (locale.getlocale()[0] or os.environ.get("LANG", "")).lower()
+    return name.startswith("zh") or name.startswith("chinese")
+
+
+_LANG_ZH = _chinese_ui()
 
 
 def T(text):
