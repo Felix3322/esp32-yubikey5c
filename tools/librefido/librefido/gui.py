@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from . import __version__
+from . import __version__, firmware
 from .backup import BackupError, read_file, write_file
 from .mgmt import Management
 from .pcsc import ApduError, list_devices
@@ -103,6 +103,20 @@ ZH = {
     "Healthy": "健康",
     "Repaired": "已自动修复",
     "Damaged": "有无法恢复的扇区",
+    "Firmware update": "固件升级",
+    "Update firmware...": "升级固件…",
+    "Keep this firmware": "保留当前固件",
+    "Roll back": "回滚到上一版本",
+    "Firmware image": "固件镜像",
+    "Firmware updated": "固件已升级",
+    "Running %s in slot %s.": "当前运行 %s（槽位 %s）。",
+    "Unconfirmed: the next restart goes back to the previous firmware.": "尚未确认：下次重启会回到上一版本固件。",
+    "The previous firmware can be restored.": "可以回滚到上一版本固件。",
+    "Install firmware %s (%s, %s build) over %s?\n\nKey storage is not touched. If the new firmware "
+    "does not start, the key returns to the current one at the next restart.":
+        "用固件 %s（%s，%s 构建）替换当前的 %s？\n\n密钥存储不会被改动。如果新固件无法正常启动，"
+        "下次重启时会自动回到当前固件。",
+    "This image is older than the running firmware. Install it anyway?": "此镜像比当前固件旧，仍然安装？",
     "warning": "安全性与便利性不可兼得：LibreFido 专注于便利性（可导出、可克隆）。请勿用它保存任何有价值的数据。",
 }
 
@@ -252,6 +266,24 @@ class MainWindow(QMainWindow):
             self.sec_labels[key] = lbl
             sform.addRow(T(title) + ":", lbl)
         lay.addWidget(sec)
+        fwg = QGroupBox(T("Firmware update"))
+        fwl = QVBoxLayout(fwg)
+        self.fw_state = QLabel("-")
+        self.fw_state.setWordWrap(True)
+        fwl.addWidget(self.fw_state)
+        fwrow = QHBoxLayout()
+        self.fw_pin = QLineEdit()
+        self.fw_pin.setEchoMode(QLineEdit.EchoMode.Password)
+        self.fw_pin.setPlaceholderText(T("FIDO PIN of the profile (if set)"))
+        fwrow.addWidget(self.fw_pin, 1)
+        for text, slot in ((T("Update firmware..."), self._update_firmware),
+                           (T("Keep this firmware"), self._confirm_firmware),
+                           (T("Roll back"), self._rollback_firmware)):
+            b = QPushButton(text)
+            b.clicked.connect(slot)
+            fwrow.addWidget(b)
+        fwl.addLayout(fwrow)
+        lay.addWidget(fwg)
         row = QHBoxLayout()
         for text, slot in ((T("Restart"), lambda: self._reboot(False)),
                            (T("Restart into recovery (ROM loader)"), lambda: self._reboot(True)),
@@ -461,6 +493,15 @@ class MainWindow(QMainWindow):
             self.table.setItem(r, 4, QTableWidgetItem(T("blocked") if p["no_export"] else T("allowed")))
         if "button_slots" in info:
             self.slots_spin.setValue(info["button_slots"])
+        fw = info.get("firmware_slot")
+        if fw:
+            text = T("Running %s in slot %s.") % (fw["version"], fw["slot"])
+            if fw["unconfirmed"]:
+                text += " " + T("Unconfirmed: the next restart goes back to the previous firmware.")
+            elif fw["rollback_possible"]:
+                text += " " + T("The previous firmware can be restored.")
+            self.fw_state.setText(text)
+            self.fw_state.setStyleSheet("color:#b70;" if fw["unconfirmed"] else "")
 
     def _show_health(self, h):
         for i, (key, title) in enumerate(HEALTH_LABELS.items()):
@@ -482,6 +523,41 @@ class MainWindow(QMainWindow):
     # -- actions -------------------------------------------------------------
     def _reboot(self, bootloader):
         self._run(lambda p: self.mgmt.reboot(bootloader=bootloader), reboots=not bootloader)
+
+    def _update_firmware(self):
+        if self.mgmt is None or not self.info:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, T("Firmware image"), "", "Firmware (*.bin);;*")
+        if not path:
+            return
+        try:
+            with open(path, "rb") as f:
+                image = f.read()
+            desc = firmware.parse(image)
+        except (OSError, firmware.FirmwareError) as e:
+            QMessageBox.critical(self, T("Error"), str(e))
+            return
+        running = self.info.get("firmware_slot", {}).get("version", self.info["firmware"])
+        question = T("Install firmware %s (%s, %s build) over %s?\n\nKey storage is not touched. If the new "
+                     "firmware does not start, the key returns to the current one at the next restart.") % (
+            desc["version"], desc["platform"], desc["build_profile"], running)
+        if QMessageBox.question(self, T("Firmware update"), question) != QMessageBox.StandardButton.Yes:
+            return
+        downgrade = firmware.compare(desc["version_tuple"], tuple(int(x) for x in running.split("."))) < 0
+        if downgrade and QMessageBox.question(
+                self, T("Firmware update"),
+                T("This image is older than the running firmware. Install it anyway?")) != QMessageBox.StandardButton.Yes:
+            return
+        pin = self.fw_pin.text() or None
+        self._run(lambda p: self.mgmt.update_firmware(image, pin=pin, allow_downgrade=downgrade, progress=p),
+                  then=lambda r: QMessageBox.information(self, T("Firmware updated"), r["installed"]),
+                  touch=True, refresh=True)
+
+    def _confirm_firmware(self):
+        self._run(lambda p: self.mgmt.confirm_firmware(), refresh=True)
+
+    def _rollback_firmware(self):
+        self._run(lambda p: self.mgmt.rollback_firmware(), touch=True, refresh=True)
 
     def _factory_reset(self):
         text, ok = QInputDialog.getText(self, T("Factory reset..."), T("Type 'erase' to erase every profile and key:"))

@@ -145,6 +145,42 @@ def cmd_factory_reset(args):
     with_session(args, run)
 
 
+def cmd_firmware(args):
+    from . import firmware
+    if args.action == "info" and args.file:
+        with open(args.file, "rb") as f:
+            _print(firmware.parse(f.read()), args.json)
+        return
+
+    def run(m):
+        if args.action == "info":
+            _print(m.info().get("firmware_slot", {}), args.json)
+        elif args.action == "update":
+            with open(args.file, "rb") as f:
+                image = f.read()
+            new = firmware.parse(image)
+            cur = m.info()
+            print("device firmware %s (%s), image %s (%s, %s build, %d bytes)" % (
+                cur["firmware"], cur.get("firmware_slot", {}).get("platform", "?"), new["version"],
+                new["platform"], new["build_profile"], new["size"]))
+            if not args.yes and input("Install it? Key storage is not touched. [y/N] ").strip().lower() != "y":
+                print("cancelled")
+                return
+            pin = getpass.getpass("FIDO PIN (empty if none): ") if args.pin else None
+            _touch_hint()
+            r = m.update_firmware(image, pin=pin, allow_downgrade=args.allow_downgrade, progress=_progress,
+                                  confirm=not args.no_confirm)
+            print("\nrunning %s%s" % (r["installed"], "" if r["confirmed"] else
+                                       " (unconfirmed: the next reset goes back)"))
+        elif args.action == "confirm":
+            m.confirm_firmware()
+            print("firmware confirmed")
+        elif args.action == "rollback":
+            _touch_hint()
+            print("running %s" % m.rollback_firmware())
+    with_session(args, run)
+
+
 def cmd_reboot(args):
     with_session(args, lambda m: m.reboot(bootloader=args.bootloader))
 
@@ -207,6 +243,15 @@ def main(argv=None):
     fr.add_argument("--yes", action="store_true")
     fr.set_defaults(fn=cmd_factory_reset)
 
+    fw = sub.add_parser("firmware", help="firmware version, update (A/B with rollback)")
+    fw.add_argument("action", choices=["info", "update", "confirm", "rollback"])
+    fw.add_argument("file", nargs="?", help="firmware image (.bin on ESP32)")
+    fw.add_argument("--allow-downgrade", action="store_true")
+    fw.add_argument("--no-confirm", action="store_true",
+                    help="leave the new firmware unconfirmed (a reset rolls back)")
+    fw.add_argument("--pin", action="store_true", help="ask for the FIDO PIN of the active profile")
+    fw.add_argument("-y", "--yes", action="store_true")
+    fw.set_defaults(fn=cmd_firmware)
     rb = sub.add_parser("reboot")
     rb.add_argument("--bootloader", action="store_true", help="ESP32 ROM download mode (recovery flash)")
     rb.set_defaults(fn=cmd_reboot)

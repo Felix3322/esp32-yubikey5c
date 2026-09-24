@@ -47,9 +47,21 @@ class Card:
         self.conn = connection
         self.reader = reader_name
         self.boot_id = None     # changes whenever the device restarts
+        self.extended = False   # extended-length APDUs work (probed by select())
+
+    def _extended(self, cla, ins, p1, p2, data, le):
+        apdu = [cla, ins, p1, p2, 0, len(data) >> 8, len(data) & 0xFF] + list(data)
+        if le is not None:
+            apdu += [0, 0]
+        resp, sw1, sw2 = self.conn.transmit(apdu)
+        return bytes(resp), (sw1 << 8) | sw2
 
     def transmit(self, cla, ins, p1, p2, data=b"", le=0, check=True, what=""):
         data = bytes(data)
+        if len(data) > 255 and self.extended:
+            # One round trip instead of a chain of short APDUs.
+            resp, sw = self._extended(cla, ins, p1, p2, data, le)
+            return self._finish(resp, sw, check, what)
         chunks = [data[i:i + 255] for i in range(0, len(data), 255)] or [b""]
         for i, chunk in enumerate(chunks):
             last = i == len(chunks) - 1
@@ -64,7 +76,9 @@ class Card:
                 if check:
                     raise ApduError(sw, what)
                 return bytes(resp), sw
-        out = bytes(resp)
+        return self._finish(bytes(resp), sw, check, what)
+
+    def _finish(self, out, sw, check, what):
         while (sw >> 8) == 0x61:
             resp, sw1, sw2 = self.conn.transmit([0x00, 0xC0, 0x00, 0x00, sw & 0xFF])
             sw = (sw1 << 8) | sw2
@@ -74,6 +88,17 @@ class Card:
         return out, sw
 
     def select(self, aid):
+        # SELECT has no side effects, so it doubles as the probe for
+        # extended-length support (reader driver and card): a refusal or a
+        # transport error just means short APDUs with chaining.
+        try:
+            resp, sw = self._extended(0x00, 0xA4, 0x04, 0x00, bytes(aid), 0)
+            if sw == 0x9000 or (sw >> 8) == 0x61:
+                self.extended = True
+                return self._finish(resp, sw, True, "select")
+        except CardConnectionException:
+            pass
+        self.extended = False
         return self.transmit(0x00, 0xA4, 0x04, 0x00, aid, le=0, what="select")
 
     def close(self):

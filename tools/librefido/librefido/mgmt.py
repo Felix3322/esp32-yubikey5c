@@ -6,6 +6,7 @@ import time
 
 from fido2 import cbor
 
+from . import firmware
 from .pcsc import ApduError, MGMT_AID, open_device
 
 CLA = 0x80
@@ -15,6 +16,7 @@ INS_PROFILE_SELECT, INS_PROFILE_SET, INS_PROFILE_WIPE, INS_PROFILE_DELETE, INS_B
 INS_EXPORT_BEGIN, INS_EXPORT_READ, INS_EXPORT_END = 0x20, 0x21, 0x22
 INS_IMPORT_BEGIN, INS_IMPORT_WRITE, INS_IMPORT_END = 0x28, 0x29, 0x2A
 INS_FACTORY_RESET, INS_REBOOT = 0x30, 0x3F
+INS_FW_BEGIN, INS_FW_WRITE, INS_FW_END, INS_FW_CONFIRM, INS_FW_ROLLBACK = 0x40, 0x41, 0x42, 0x43, 0x44
 
 PROFILE_F_NO_EXPORT = 0x01
 BOOT_STATUS = ["ok", "partition table too old", "system area unreadable",
@@ -75,6 +77,16 @@ class Management:
                 "root_key": DRK_SOURCES[m[8][8]] if m[8][8] < len(DRK_SOURCES) else str(m[8][8]),
             },
         }
+        if 16 in m:
+            fw = m[16]
+            out["firmware_slot"] = {
+                "version": "%d.%d.%d" % tuple(fw[1]),
+                "platform": firmware.PLATFORMS.get(fw[2], str(fw[2])),
+                "board": fw[3],
+                "slot": "factory" if fw[4] == firmware.SLOT_FACTORY else fw[4],
+                "unconfirmed": fw[5],
+                "rollback_possible": fw[6],
+            }
         if 9 in m:
             out.update({
                 "active": m[9],
@@ -177,6 +189,46 @@ class Management:
         if info["last_result"] != RESULTS[2]:
             raise ApduError(0x6F00, "import failed on the device: %s" % info["last_result"])
         return res
+
+    # -- firmware ------------------------------------------------------------
+    def update_firmware(self, image, pin=None, allow_downgrade=False, progress=None, confirm=True,
+                        timeout=30.0):
+        """Installs image in the other slot (touch, and the FIDO PIN when the
+        active profile has one) and restarts into it. With confirm, the new
+        firmware is kept once it answers with the expected version; otherwise
+        the next reset of the device goes back to the current one."""
+        desc = firmware.parse(image)
+        params = {1: len(image), 2: hashlib.sha256(image).digest()}
+        if pin:
+            params[3] = pin.encode("utf-8")
+        self._cmd(INS_FW_BEGIN, 0, 1 if allow_downgrade else 0, data=cbor.encode(params), what="firmware update")
+        off, chunk = 0, 1024
+        while off < len(image):
+            part = image[off:off + chunk]
+            self._cmd(INS_FW_WRITE, data=struct.pack(">I", off) + part, what="firmware write")
+            off += len(part)
+            if progress:
+                progress(off, len(image))
+        m = cbor.decode(self._cmd(INS_FW_END, what="firmware check"))
+        installed = "%d.%d.%d" % tuple(m[1])
+        self.reconnect(timeout)
+        now = self.info()
+        if now["firmware"] != installed:
+            raise ApduError(0x6F00, "the device runs %s after the update, expected %s (rolled back?)"
+                            % (now["firmware"], installed))
+        if confirm:
+            self.confirm_firmware()
+        return {"installed": installed, "descriptor": desc, "confirmed": confirm}
+
+    def confirm_firmware(self):
+        """Keeps the running firmware (no rollback at the next reset)."""
+        self._cmd(INS_FW_CONFIRM, what="confirm firmware")
+
+    def rollback_firmware(self, timeout=30.0):
+        """Goes back to the previous firmware (touch); the device restarts."""
+        self._cmd(INS_FW_ROLLBACK, what="firmware rollback")
+        self.reconnect(timeout)
+        return self.info()["firmware"]
 
     def factory_reset(self, legacy=False):
         self._cmd(INS_FACTORY_RESET, 0x5A, 1 if legacy else 0, what="factory reset")
