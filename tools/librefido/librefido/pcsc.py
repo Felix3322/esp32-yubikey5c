@@ -10,6 +10,7 @@ import time
 
 from smartcard.System import readers
 from smartcard.Exceptions import CardConnectionException, NoCardException
+from smartcard.scard import SCARD_LEAVE_CARD
 
 # Proprietary, unregistered AID (ISO/IEC 7816-5 category F).
 MGMT_AID = b"\xF0LIBREFIDO"
@@ -45,6 +46,7 @@ class Card:
     def __init__(self, connection, reader_name):
         self.conn = connection
         self.reader = reader_name
+        self.boot_id = None     # changes whenever the device restarts
 
     def transmit(self, cla, ins, p1, p2, data=b"", le=0, check=True, what=""):
         data = bytes(data)
@@ -81,13 +83,21 @@ class Card:
             pass
 
 
+def _connect(r):
+    """Shared connection that leaves the card powered on disconnect: pyscard
+    unpowers it by default, which resets the card under every other session
+    (another program, or this one's open management session)."""
+    c = r.createConnection()
+    c.connect(disposition=SCARD_LEAVE_CARD)
+    return c
+
+
 def list_devices():
     """(reader name, SELECT answer) of every connected LibreFido device."""
     found = []
     for r in readers():
-        c = r.createConnection()
         try:
-            c.connect()
+            c = _connect(r)
         except (NoCardException, CardConnectionException):
             continue
         card = Card(c, str(r))
@@ -101,22 +111,26 @@ def list_devices():
     return found
 
 
-def open_device(reader=None, timeout=0.0):
+def open_device(reader=None, timeout=0.0, not_boot_id=None):
     """Connects to the management applet (the first device, or reader).
-    timeout > 0 waits for a device to (re)appear, e.g. after a reboot."""
+    timeout > 0 waits for a device to (re)appear, e.g. after a reboot;
+    not_boot_id skips a device instance that has not restarted yet."""
     deadline = time.time() + timeout
     while True:
         for r in readers():
             if reader and not str(r).startswith(reader):
                 continue
-            c = r.createConnection()
             try:
-                c.connect()
+                c = _connect(r)
             except (NoCardException, CardConnectionException):
                 continue
             card = Card(c, str(r))
             try:
-                card.select(MGMT_AID)
+                answer, _ = card.select(MGMT_AID)
+                card.boot_id = answer[4:8] if len(answer) >= 8 else None
+                if not_boot_id is not None and card.boot_id == not_boot_id:
+                    card.close()
+                    continue
                 return card
             except (ApduError, CardConnectionException):
                 card.close()

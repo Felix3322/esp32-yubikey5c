@@ -46,11 +46,12 @@ class Management:
         self.card.close()
 
     def reconnect(self, timeout=20.0):
-        """After an operation that reboots the device."""
-        reader = self.card.reader
+        """After an operation that reboots the device: waits for the restarted
+        instance (another boot ID), not the one about to go down."""
+        reader, old = self.card.reader, self.card.boot_id
         self.card.close()
-        time.sleep(0.5)
-        self.card = open_device(reader, timeout)
+        time.sleep(0.3)
+        self.card = open_device(reader, timeout, not_boot_id=old)
 
     def _cmd(self, ins, p1=0, p2=0, data=b"", what=""):
         resp, _ = self.card.transmit(CLA, ins, p1, p2, data, le=0, what=what)
