@@ -12,14 +12,15 @@ import time
 import pytest
 
 from . import ctaphid
-from .emulator import Emulator, Pcscd
+from .emulator import Emulator, Pcscd, ensure_session, set_session
 
 _pcscd = None
 _emu = None
 
 
 def emulator_instance():
-    return _emu
+    """The session emulator, restarted if a self-managed test stopped it."""
+    return ensure_session()
 
 
 def pytest_configure(config):
@@ -29,7 +30,19 @@ def pytest_configure(config):
     _pcscd.start()
     _emu = Emulator()
     _emu.start()
+    set_session(_emu, _pcscd)
     time.sleep(0.5 if _pcscd.available else 0)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _lf_session_for_upstream(request):
+    """The upstream pico-fido suites reach the session emulator through
+    python-fido2 and class-scoped card fixtures directly: make sure it runs
+    before any of them (a self-managed module earlier in the session may
+    have suspended it). Module scope, so it runs before class fixtures."""
+    if "/pico-fido/tests/" in str(request.node.fspath).replace("\\", "/"):
+        ensure_session()
+    yield
 
 
 def pytest_unconfigure(config):
@@ -54,14 +67,15 @@ def pytest_collection_modifyitems(session, config, items):
         dev.reboot = _power_cycle_reboot
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def emulator():
-    return _emu
+    return ensure_session()
 
 
 @pytest.fixture
 def card():
     from .card import Card
+    ensure_session()
     c = Card()
     yield c
     c.close()
@@ -69,6 +83,7 @@ def card():
 
 @pytest.fixture
 def ctap_device():
+    ensure_session()
     d = ctaphid.open_device()
     yield d
     d.close()

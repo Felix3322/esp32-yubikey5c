@@ -25,6 +25,12 @@ BASELINE = os.environ.get("LF_EMU_BASELINE_BIN") or os.path.expanduser("~/work/b
 LEGACY_SPAN = 0x800000          # emulator legacy store region [0, 8 MiB)
 PIN = "314159"
 
+# The baseline binary (upstream sources) listens on the fixed default ports:
+# it cannot run in a test slot with its own ports next to other runs.
+pytestmark = pytest.mark.skipif(bool(os.environ.get("LF_TEST_PORT_BASE")),
+                                reason="the baseline emulator has fixed ports: run without a test slot "
+                                       "(LF_TEST_PORT_BASE unset, the global lock)")
+
 
 @pytest.fixture(scope="module")
 def pcscd():

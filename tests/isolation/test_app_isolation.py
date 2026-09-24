@@ -288,13 +288,32 @@ def test_piv_administration_needs_the_management_key(device):
 
 def test_vendor_key_restore_needs_touch_and_pin(pcscd, tmp_path):
     """The vendor command that replaces the device key (every credential
-    goes) was open to any host."""
+    goes) was open to any host. It needs a PIN (there is no path without
+    one), a pinUvAuthToken with acfg, a touch, and the host key K (sent over
+    the MSE channel) that opens the blob."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
     from fido2 import cbor
     from fido2.ctap import CtapError
     from fido2.ctap2 import ClientPin
+    from fido2.ctap2.pin import PinProtocolV2
     from harness.emulator import Button
     import threading
-    import time
+
+    def mse_host_key(dev):
+        """Vendor MSE key agreement; a random host key K encrypted for it."""
+        priv = ec.generate_private_key(ec.SECP256R1())
+        qpt = priv.public_key().public_bytes(serialization.Encoding.X962,
+                                             serialization.PublicFormat.UncompressedPoint)
+        cose = {1: 2, 3: -25, -1: 1, -2: qpt[1:33], -3: qpt[33:]}
+        resp = dev.call(0x41, bytes([0x02]) + cbor.encode({1: 1, 2: {2: cose}}))
+        assert resp[0] == 0, hex(resp[0])
+        dk = cbor.decode(resp[1:])[1]
+        peer = ec.EllipticCurvePublicNumbers(int.from_bytes(dk[-2], "big"), int.from_bytes(dk[-3], "big"),
+                                             ec.SECP256R1()).public_key()
+        k = HKDF(algorithm=hashes.SHA256(), length=44, salt=None, info=qpt).derive(priv.exchange(ec.ECDH(), peer))
+        return ChaCha20Poly1305(k[12:]).encrypt(k[:12], os.urandom(32), qpt)
 
     def touching(fn):
         """Runs fn while the button is pressed every 0.3 s."""
@@ -317,15 +336,25 @@ def test_vendor_key_restore_needs_touch_and_pin(pcscd, tmp_path):
     e.start()
     try:
         touching(lambda: fido_make(b"alice"))
-        restore = bytes([0x01]) + cbor.encode({1: 0x02, 2: {1: os.urandom(60)}})
+        blob = os.urandom(60)                           # does not open with K
         dev = ctaphid.open_device()
         try:
+            kct = mse_host_key(dev)
+            restore = bytes([0x01]) + cbor.encode({1: 0x02, 2: {1: blob, 3: kct}})
             # vendor CBOR command: the answer starts with the CTAP status
-            status = dev.call(0x41, restore)[0]           # nobody touches
-            assert status in (CtapError.ERR.USER_ACTION_TIMEOUT, CtapError.ERR.OPERATION_DENIED), hex(status)
+            status = dev.call(0x41, restore)[0]           # no PIN set: never
+            assert status == CtapError.ERR.PIN_NOT_SET, hex(status)
             ClientPin(Ctap2(dev)).set_pin("123456")
             status = dev.call(0x41, restore)[0]           # PIN set, no token
             assert status == CtapError.ERR.PUAT_REQUIRED, hex(status)
+            protocol = PinProtocolV2()
+            token = ClientPin(Ctap2(dev), protocol).get_pin_token("123456", ClientPin.PERMISSION.AUTHENTICATOR_CFG)
+            auth = protocol.authenticate(token, b"\xff" * 32 + bytes([0xC1, 0x01, 0x02]) + blob + kct)
+            restore = bytes([0x01]) + cbor.encode({1: 0x02, 2: {1: blob, 3: kct}, 3: protocol.VERSION, 4: auth})
+            status = dev.call(0x41, restore)[0]           # PIN token, nobody touches
+            assert status in (CtapError.ERR.USER_ACTION_TIMEOUT, CtapError.ERR.OPERATION_DENIED), hex(status)
+            status = touching(lambda: dev.call(0x41, restore)[0])
+            assert status == CtapError.ERR.INVALID_PARAMETER, hex(status)   # the blob does not open
         finally:
             dev.close()
         assert touching(fido_users) == {b"alice"}       # device key untouched

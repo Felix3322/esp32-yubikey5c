@@ -1,4 +1,14 @@
-"""Lifecycle of the emulator process and of the user-mode PC/SC daemon."""
+"""Lifecycle of the emulator process and of the user-mode PC/SC daemon.
+
+Ports: CTAPHID on LF_TEST_PORT_BASE (default 35962), vpcd on +1, the
+presence button on +8. Test runs with different bases (and their own
+PCSCLITE_CSOCK_NAME) run side by side, see ~/work/scripts/locked_tests.sh.
+
+The pytest plugin keeps a session emulator + pcscd for the suites that use
+them (upstream pico-fido tests, `emulator`/`card`/`ctap_device` fixtures).
+A test that starts its own Emulator or Pcscd suspends the session ones
+(same ports); ensure_session() brings them back when needed.
+"""
 
 import os
 import shutil
@@ -9,9 +19,28 @@ import tempfile
 import time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-HID_PORT = 35962
-VPCD_PORT = 35963
-UP_PORT = 35970
+HID_PORT = int(os.environ.get("LF_TEST_PORT_BASE", "35962"))
+VPCD_PORT = HID_PORT + 1
+UP_PORT = HID_PORT + 8
+
+# Session instances owned by the pytest plugin (harness.plugin).
+_session = {"emu": None, "pcscd": None}
+
+
+def set_session(emu, pcscd):
+    _session["emu"], _session["pcscd"] = emu, pcscd
+
+
+def ensure_session():
+    """Restarts the session pcscd/emulator if a self-managed test stopped
+    them and nothing else holds their ports now. Returns the emulator."""
+    emu, pcscd = _session["emu"], _session["pcscd"]
+    if pcscd is not None and pcscd.proc is None and not _port_open(VPCD_PORT):
+        pcscd.start()
+    if emu is not None and emu.proc is None and not _port_open(HID_PORT):
+        emu.start()
+        time.sleep(0.3)
+    return emu
 
 
 def _wait_port(port, timeout=10.0, host="127.0.0.1"):
@@ -42,20 +71,27 @@ class Pcscd:
         self.bin = os.environ.get("PCSCD_BIN")
         self.driver = os.environ.get("VPCD_DRIVER") or os.environ.get("VPCD_DRIVER_1SLOT")
         self.reader_name = os.environ.get("VPCD_READER_NAME", "Virtual PCD")
-        self.available = bool(self.dir and self.bin and self.driver and os.path.exists(self.bin))
+        # CI: the distribution's pcscd service with the vsmartcard-vpcd reader
+        # (listening on VPCD_PORT) is already running; nothing to start.
+        self.system = os.environ.get("LF_TEST_SYSTEM_PCSCD") == "1"
+        self.available = self.system or bool(self.dir and self.bin and self.driver and os.path.exists(self.bin))
 
     def start(self):
-        if not self.available or self.proc:
+        if not self.available or self.proc or self.system:
             return
+        session = _session["pcscd"]
+        if session is not None and session is not self and session.proc is not None:
+            session.stop()      # same socket and vpcd port; ensure_session() restarts it
         os.makedirs(os.path.join(self.dir, "reader.conf.d"), exist_ok=True)
-        conf = os.path.join(self.dir, "reader.conf.d", "vpcd-pytest")
+        conf = os.path.join(self.dir, "reader.conf.d", "vpcd-pytest-%d" % VPCD_PORT)
         with open(conf, "w") as f:
             f.write('FRIENDLYNAME "%s"\nDEVICENAME /dev/null:0x%X\nLIBPATH %s\nCHANNELID 0x%X\n'
                     % (self.reader_name, VPCD_PORT, self.driver, VPCD_PORT))
         sock = os.environ["PCSCLITE_CSOCK_NAME"]
+        os.makedirs(os.path.dirname(sock), exist_ok=True)
         if os.path.exists(sock):
             os.unlink(sock)
-        log = open(os.path.join(self.dir, "pcscd-pytest.log"), "w")
+        log = open(os.path.join(self.dir, "pcscd-pytest-%d.log" % VPCD_PORT), "w")
         self.proc = subprocess.Popen([self.bin, "--foreground", "--disable-polkit", "--config", conf],
                                      stdout=log, stderr=subprocess.STDOUT)
         deadline = time.time() + 5
@@ -108,6 +144,9 @@ class Emulator:
     def start(self, **env):
         if self.proc:
             return
+        session = _session["emu"]
+        if session is not None and session is not self and session.proc is not None:
+            session.stop()      # same ports; ensure_session() restarts it later
         if _port_open(HID_PORT):
             raise RuntimeError("HID port %d is taken: another emulator is still running" % HID_PORT)
         e = dict(os.environ)
@@ -115,6 +154,8 @@ class Emulator:
         e.update({k: str(v) for k, v in env.items()})
         e["PICO_FLASH_FILE"] = self.flash_path
         e["PICO_EFUSE_FILE"] = self.efuse_path
+        e["LF_EMU_VPCD_PORT"] = str(VPCD_PORT)
+        e["LF_EMU_UP_PORT"] = str(UP_PORT)
         self._log = open(self.log_path, "a")
         self._log.flush()
         self.log_start = os.path.getsize(self.log_path)

@@ -102,3 +102,57 @@ def test_gui_manages_the_device(pcscd, app, tmp_path, monkeypatch):
         w.close()
     finally:
         e.stop()
+
+
+def test_gui_security_tab(pcscd, app, tmp_path, monkeypatch):
+    """The Security tab: presence per application, LED brightness, binding
+    the root key and locking debugging (level 2), a secure profile."""
+    e = Emulator(workdir=str(tmp_path / "dev"))
+    e.start()
+    try:
+        Management.open(timeout=15).close()
+        w = gui.MainWindow()
+        tab = w.security_tab
+        assert w.tabs.tabText(w.tabs.indexOf(tab)) == gui.T("Security")
+        assert w.mgmt is not None and "0 / 3" in tab.level.text(), app.messages
+        monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                            staticmethod(lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Yes))
+        monkeypatch.setattr(gui.gui_policy, "metadata_dir", lambda: str(tmp_path))
+
+        # automatic presence for FIDO (the emulator confirms the touch itself)
+        tab.need_touch["fido"].setChecked(False)
+        tab._apply_presence()
+        wait_idle(app, w)
+        assert w.info["profiles"][0]["auto_presence"] == ["fido"], app.messages
+        tab.need_touch["fido"].setChecked(True)         # a touch again (needs none itself)
+        tab._apply_presence()
+        wait_idle(app, w)
+        assert w.info["profiles"][0]["auto_presence"] == []
+
+        # LED brightness, applied at once
+        tab.bright.setValue(40)
+        tab._brightness()
+        wait_idle(app, w)
+        assert w.info["board"]["led_brightness"] == 40
+
+        # level 2: bind the root key, lock debugging (typed confirmations)
+        confirm = "BURN %s" % w.info["chip_serial"]
+        monkeypatch.setattr(QtWidgets.QInputDialog, "getText", staticmethod(lambda *a, **k: (confirm, True)))
+        tab._bind()
+        wait_idle(app, w)
+        assert w.info["security"]["root_key"] == "flash, bound to HMAC eFuse key", app.messages
+        tab._lock_debug()
+        wait_idle(app, w)
+        sec = w.info["security"]
+        assert sec["jtag_disabled"] and sec["download_restricted"] and "2 / 3" in tab.level.text(), app.messages
+
+        # a secure profile in slot 3; the device restarts and the GUI reconnects
+        tab.slot.setCurrentIndex(2)
+        tab._create_secure()
+        wait_idle(app, w, timeout=60)
+        p = w.info["profiles"][2]
+        assert p["used"] and p["secure"] and p["no_export"], app.messages
+        assert not [m for m in app.messages if m[0] == "critical"], app.messages
+        w.close()
+    finally:
+        e.stop()

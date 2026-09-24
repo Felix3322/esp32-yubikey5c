@@ -79,6 +79,19 @@ def test_hardened_keeps_keys_inside(pcscd, emulators, tmp_path):
     m.close()
 
 
+def build_profile(img, profile):
+    """Copy of img whose descriptor names another build profile."""
+    out = bytearray(img)
+    out[firmware.parse(img)["offset"] + 18] = profile
+    return bytes(out)
+
+
+def newer(img, k=1):
+    """Version k patch releases after the one of img."""
+    v = firmware.parse(img)["version_tuple"]
+    return (v[0], v[1], v[2] + k)
+
+
 def test_hardened_firmware_policy(pcscd, emulators, tmp_path):
     e, m = provisioned(emulators, tmp_path)
     with open(BIN, "rb") as f:
@@ -87,7 +100,69 @@ def test_hardened_firmware_policy(pcscd, emulators, tmp_path):
     with pytest.raises(ApduError) as err:
         m.update_firmware(older, allow_downgrade=True)      # never a downgrade
     assert err.value.sw == 0x6986
-    assert m.update_firmware(firmware.set_version(img, (2, 0, 1)))["installed"] == "2.0.1"
+    # never a build that allows more (STANDARD exports keys), even a newer one
+    for profile in (0, 1):
+        with pytest.raises(ApduError) as err:
+            m.update_firmware(build_profile(firmware.set_version(img, newer(img, 2)), profile),
+                              allow_downgrade=True)
+        assert err.value.sw == 0x6986
+    version = "%d.%d.%d" % newer(img)
+    assert m.update_firmware(firmware.set_version(img, newer(img)))["installed"] == version
+    # and no way back to the older image either
+    assert m.info()["firmware_slot"]["rollback_possible"]
+    with pytest.raises(ApduError) as err:
+        m.rollback_firmware()
+    assert err.value.sw == 0x6986
+    assert m.info()["firmware"] == version
+    m.close()
+
+
+def test_hardened_restores_a_backup(pcscd, emulators, tmp_path):
+    """HARDENED promises that keys never leave the device, not that they
+    were born on it: a backup (from a STANDARD device, since HARDENED never
+    exports) can be restored, and then never leaves again."""
+    from test_profiles_backup import user_ids, wait_reboot
+    std = emulators("std")
+    m = device(std)
+    make_rk(b"alice")
+    stream = m.export_profile()
+    m.close()
+    std.stop()
+    e, m = provisioned(emulators, tmp_path)
+    m.import_profile(stream, 1)
+    m.select_profile(1)
+    wait_reboot(m)
+    assert user_ids() == {b"alice"}
+    assert not m.info()["export_allowed"]
+    with pytest.raises(ApduError) as err:
+        m.export_profile()
+    assert err.value.sw == 0x6986
+    m.close()
+
+
+def test_locked_key_store_still_asks_for_the_pin(pcscd, emulators, tmp_path):
+    """The PIN check of an update does not depend on the key store being
+    unlocked (before, a locked store left only the touch)."""
+    import hashlib
+    from fido2 import cbor
+    from librefido.mgmt import INS_FW_BEGIN, Management
+    from test_profiles_backup import set_pin
+    e, m = provisioned(emulators, tmp_path)
+    set_pin("123456")
+    m.close()
+    e.restart(LF_EMU_CHIP_SECURE="0")                       # chip state incomplete: store locked
+    m = Management.open(timeout=15)
+    with open(BIN, "rb") as f:
+        img = firmware.set_version(f.read(), (2, 0, 1))
+    params = {1: len(img), 2: hashlib.sha256(img).digest()}
+    with pytest.raises(ApduError) as err:
+        m._cmd(INS_FW_BEGIN, data=cbor.encode(params))                  # no PIN
+    assert err.value.sw == 0x6982
+    with pytest.raises(ApduError) as err:
+        m._cmd(INS_FW_BEGIN, data=cbor.encode({**params, 3: b"000000"}))
+    assert err.value.sw & 0xFFF0 == 0x63C0
+    m._cmd(INS_FW_BEGIN, data=cbor.encode({**params, 3: b"123456"}))    # then the touch
+    m.info()                                                            # ends the upload
     m.close()
 
 
