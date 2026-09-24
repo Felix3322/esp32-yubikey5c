@@ -13,7 +13,7 @@ QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 
 from harness import ctaphid                     # noqa: E402
 from harness.emulator import Emulator, Pcscd    # noqa: E402
-from librefido import gui                       # noqa: E402
+from librefido import firmware, gui             # noqa: E402
 from librefido.backup import read_file          # noqa: E402
 from librefido.mgmt import Management           # noqa: E402
 
@@ -82,6 +82,22 @@ def test_gui_manages_the_device(pcscd, app, tmp_path, monkeypatch):
         wait_idle(app, w)
         assert w.info["active"] == 1, (app.messages, w.statusBar().currentMessage(), w.mgmt)
         assert w.table.item(1, 3).text() == gui.T("active")
+
+        # firmware update from a file, confirmed once the new firmware answers
+        fw_path = str(tmp_path / "fw.bin")
+        with open(e.binary, "rb") as f:
+            new = firmware.set_version(f.read(), (2, 0, 7))
+        with open(fw_path, "wb") as f:
+            f.write(new)
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (fw_path, "")))
+        monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                            staticmethod(lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Yes))
+        w._update_firmware()
+        wait_idle(app, w)
+        assert w.info["firmware"] == "2.0.7", app.messages
+        assert not w.info["firmware_slot"]["unconfirmed"]
+        assert "2.0.7" in w.fw_state.text()
+        assert w.info["active"] == 1                    # profiles untouched
         assert not [m for m in app.messages if m[0] == "critical"], app.messages
         w.close()
     finally:
