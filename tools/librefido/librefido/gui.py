@@ -20,9 +20,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from . import __version__, firmware
-from .backup import BackupError, read_file, write_file
-from .mgmt import Management
+from smartcard.Exceptions import CardConnectionException
+
+from . import __version__, firmware, gui_policy, provision
+from .backup import BackupError, firmware_supports, read_file, write_file
+from .mgmt import Management, PinRequired, clip_name, display_name
 from .pcsc import ApduError, list_devices
 
 # ----------------------------------------------------------------------------
@@ -43,7 +45,8 @@ ZH = {
     "Profile serial": "当前环境序列号",
     "Storage": "存储状态",
     "Last operation": "上次操作",
-    "Security": "安全状态",
+    "Chip security": "芯片安全状态",
+    "secure profile": "安全环境",
     "Secure Boot": "安全启动",
     "Flash encryption": "Flash 加密",
     "JTAG disabled": "JTAG 已禁用",
@@ -117,17 +120,43 @@ ZH = {
         "用固件 %s（%s，%s 构建）替换当前的 %s？\n\n密钥存储不会被改动。如果新固件无法正常启动，"
         "下次重启时会自动回到当前固件。",
     "This image is older than the running firmware. Install it anyway?": "此镜像比当前固件旧，仍然安装？",
+    "FIDO PIN": "FIDO PIN",
+    "FIDO PIN of the active profile:": "当前环境的 FIDO PIN：",
+    "FIDO PIN of the active profile (leave empty if it has none):": "当前环境的 FIDO PIN（如未设置请留空）：",
+    "The active profile has a FIDO PIN: it is needed.": "当前环境设置了 FIDO PIN，必须输入。",
+    "Enter a passphrase": "请输入口令",
+    "The backup will NOT be encrypted: anyone with the file has your keys. Continue?":
+        "备份将不加密：拿到此文件的人即拿到你的密钥。继续？",
+    "Warning": "警告",
+    "NOT encrypted: nothing proves this file was not modified.": "未加密：无法证明此文件未被篡改。",
+    "The connected device (firmware %s) cannot import it: it needs %s or newer.":
+        "已连接的设备（固件 %s）无法导入：需要 %s 或更新版本。",
+    "This backup needs firmware %s or newer.": "此备份需要固件 %s 或更新版本。",
+    "This backup is NOT encrypted, so nothing proves it was not replaced by someone who could write "
+    "the file. Import it anyway?": "此备份未加密，无法证明它没有被能写入该文件的人替换。仍然导入？",
+    "Replace slot %d?": "替换槽位 %d？",
+    "Import into slot %d?": "导入到槽位 %d？",
+    "Slot %d (%s) is in use. Importing %s replaces it and erases its keys for good.":
+        "槽位 %d（%s）已在使用。导入 %s 会替换它，其中的密钥将被永久清除。",
+    "Details:": "详细信息：",
+    "The device asks for the FIDO PIN of the active profile.": "设备要求输入当前环境的 FIDO PIN。",
     "warning": "安全性与便利性不可兼得：LibreFido 专注于便利性（可导出、可克隆）。请勿用它保存任何有价值的数据。",
 }
+
+# English of the texts that are keys rather than English sentences.
+EN = {
+    "warning": "Security and convenience cannot both be had: LibreFido favours convenience (exportable, "
+               "clonable keys). Do not keep anything valuable on it.",
+}
+
+gui_policy.install_translations(ZH, EN)
 
 _LANG_ZH = (locale.getlocale()[0] or os.environ.get("LANG", "")).lower().startswith("zh") or \
     os.environ.get("LIBREFIDO_LANG", "").lower().startswith("zh")
 
 
 def T(text):
-    return ZH.get(text, text) if _LANG_ZH else (text if text != "warning" else
-        "Security and convenience cannot both be had: LibreFido favours convenience (exportable, "
-        "clonable keys). Do not keep anything valuable on it.")
+    return ZH.get(text, text) if _LANG_ZH else EN.get(text, text)
 
 
 HEALTH_LABELS = {
@@ -176,7 +205,7 @@ ZH.update({
 
 class _Signals(QObject):
     done = Signal(object)
-    failed = Signal(str)
+    failed = Signal(object)         # (exception, message)
     progress = Signal(int, int)
 
 
@@ -187,12 +216,30 @@ class Job(QRunnable):
         self.signals = _Signals()
 
     def run(self):
+        # The work function goes with this frame: what its closure holds (a
+        # decrypted backup, a PIN, a passphrase, an image) is not kept by the
+        # Job, which lives on until the next one (Python cannot wipe memory,
+        # but nothing refers to the secrets any more).
+        fn, self.fn = self.fn, None
         try:
-            self.signals.done.emit(self.fn(lambda a, b: self.signals.progress.emit(a, b)))
-        except (ApduError, BackupError, RuntimeError, OSError) as e:
-            self.signals.failed.emit(str(e))
-        except Exception:
-            self.signals.failed.emit(traceback.format_exc())
+            self.signals.done.emit(fn(lambda a, b: self.signals.progress.emit(a, b)))
+        except (ApduError, BackupError, RuntimeError, OSError, CardConnectionException,
+                provision.ProvisionError) as e:
+            self.signals.failed.emit((e, str(e)))
+        except Exception as e:
+            self.signals.failed.emit((e, traceback.format_exc()))
+        finally:
+            fn = None
+
+
+def _plain(text):
+    """Text for a QMessageBox, which shows rich text when its first line looks
+    like HTML: a name from the device or a backup could hide or rewrite the
+    message. A fixed first line keeps it plain text."""
+    first = text.split("\n", 1)[0]
+    if "<" in first or "&" in first:
+        return T("Details:") + "\n" + text
+    return text
 
 
 # ----------------------------------------------------------------------------
@@ -209,6 +256,8 @@ class MainWindow(QMainWindow):
         self.info = None
         self.busy = False
         self._job = None
+        self._then = self._on_error = None
+        self._refresh_after = False
 
         central = QWidget()
         root = QVBoxLayout(central)
@@ -232,6 +281,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._device_tab(), T("Device"))
         self.tabs.addTab(self._profiles_tab(), T("Profiles"))
         self.tabs.addTab(self._backup_tab(), T("Backup"))
+        self.security_tab = gui_policy.SecurityTab(self, T)
+        self.tabs.addTab(self.security_tab, T("Security"))
         self.tabs.addTab(self._health_tab(), T("Health"))
         root.addWidget(self.tabs, 1)
 
@@ -253,22 +304,25 @@ class MainWindow(QMainWindow):
                            ("chip_serial", "Chip serial"), ("serial", "Profile serial"),
                            ("boot_message", "Storage"), ("last_result", "Last operation")):
             lbl = QLabel("-")
+            lbl.setTextFormat(Qt.TextFormat.PlainText)         # device text, never rich text
             lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             self.dev_labels[key] = lbl
             form.addRow(T(title) + ":", lbl)
         lay.addLayout(form)
-        sec = QGroupBox(T("Security"))
+        sec = QGroupBox(T("Chip security"))
         sform = QFormLayout(sec)
         self.sec_labels = {}
         for key, title in (("secure_boot", "Secure Boot"), ("flash_encryption", "Flash encryption"),
                            ("jtag_disabled", "JTAG disabled"), ("root_key", "Root key")):
             lbl = QLabel("-")
+            lbl.setTextFormat(Qt.TextFormat.PlainText)
             self.sec_labels[key] = lbl
             sform.addRow(T(title) + ":", lbl)
         lay.addWidget(sec)
         fwg = QGroupBox(T("Firmware update"))
         fwl = QVBoxLayout(fwg)
         self.fw_state = QLabel("-")
+        self.fw_state.setTextFormat(Qt.TextFormat.PlainText)
         self.fw_state.setWordWrap(True)
         fwl.addWidget(self.fw_state)
         fwrow = QHBoxLayout()
@@ -321,7 +375,7 @@ class MainWindow(QMainWindow):
         srow.addWidget(self.slots_spin)
         apply_btn = QPushButton(T("Apply"))
         apply_btn.clicked.connect(lambda: self._run(lambda p: self.mgmt.set_button_slots(self.slots_spin.value()),
-                                                    refresh=True))
+                                                    touch=self._change_touch(), refresh=True))
         srow.addWidget(apply_btn)
         srow.addStretch(1)
         lay.addLayout(srow)
@@ -375,7 +429,10 @@ class MainWindow(QMainWindow):
         irow.addWidget(ib)
         irow.addStretch(1)
         lay.addWidget(im)
-        self.loaded_stream = None
+        # The last verified backup file: only its path is kept. The device
+        # checks read and decrypt it again, so the decrypted stream (every
+        # key of the profile) lives only as long as one operation.
+        self.loaded_path = None
         return w
 
     def _health_tab(self):
@@ -396,12 +453,16 @@ class MainWindow(QMainWindow):
         return w
 
     # -- plumbing ------------------------------------------------------------
-    def _run(self, fn, then=None, touch=False, reboots=False, refresh=False):
+    def _run(self, fn, then=None, touch=False, reboots=False, refresh=False, on_error=None, device=True):
+        """Runs fn(progress) in a worker thread. Afterwards, on the GUI
+        thread: then(result), or on_error(exception), which returns True when
+        it handled the failure (otherwise the error is shown). device=False
+        for work without a device (backup files). Returns whether it started."""
         if self.busy:
-            return
-        if self.mgmt is None:
+            return False
+        if device and self.mgmt is None:
             QMessageBox.warning(self, T("Error"), T("No device"))
-            return
+            return False
         self.busy = True
         self.banner.setText(T("Touch the key now (it blinks yellow)...") if touch else T("Working..."))
         self.banner.setVisible(True)
@@ -415,18 +476,25 @@ class MainWindow(QMainWindow):
         job = Job(work)
         job.setAutoDelete(False)
         job.signals.progress.connect(self._on_progress)
-        job.signals.done.connect(lambda r: self._finished(r, then, refresh or reboots))
+        # The callbacks are kept here and dropped once used, not in the Job's
+        # signal connections, which live as long as the Job: they may hold
+        # what the operation needs (a passphrase for a retry, for example).
+        self._then, self._on_error, self._refresh_after = then, on_error, refresh or reboots
+        job.signals.done.connect(self._finished)
         job.signals.failed.connect(self._failed)
         # The Python side (and its signals) must outlive the worker thread.
         self._job = job
         self.pool.start(job)
+        return True
 
     def _on_progress(self, done, total):
         self.progress.setVisible(True)
         self.progress.setMaximum(max(total, 1))
         self.progress.setValue(done)
 
-    def _finished(self, result, then, refresh):
+    def _finished(self, result):
+        then, refresh = self._then, self._refresh_after
+        self._then = self._on_error = None
         self.busy = False
         self.banner.setVisible(False)
         self.progress.setVisible(False)
@@ -435,12 +503,42 @@ class MainWindow(QMainWindow):
         if refresh:
             self.refresh()
 
-    def _failed(self, msg):
+    def _failed(self, failure):
+        exc, msg = failure
+        on_error = self._on_error
+        self._then = self._on_error = None
         self.busy = False
         self.banner.setVisible(False)
         self.progress.setVisible(False)
-        QMessageBox.critical(self, T("Error"), msg)
-        self.refresh()
+        if not (on_error and on_error(exc)):
+            QMessageBox.critical(self, T("Error"), _plain(msg))
+        self.refresh()                          # (does nothing while a retry runs)
+
+    def _run_pin(self, op, typed, no_pin=False, then=None, refresh=False):
+        """Runs op(pin, no_pin, progress), an operation that takes the FIDO
+        PIN of the active profile, with the PIN typed in a field. When it
+        turns out that a PIN is needed and none was typed (checked in the
+        worker: the check waits for the device), the PIN is asked for and op
+        runs once more."""
+        def on_error(e):
+            if typed or not isinstance(e, PinRequired) or not e.ask:
+                return False
+            if e.kind == "unknown":
+                label = T("FIDO PIN of the active profile (leave empty if it has none):")
+            elif e.kind == "device":
+                label = T("The device asks for the FIDO PIN of the active profile.") + "\n" + \
+                    T("FIDO PIN of the active profile:")
+            else:
+                label = T("FIDO PIN of the active profile:")
+            pin, ok = QInputDialog.getText(self, T("FIDO PIN"), label, QLineEdit.EchoMode.Password)
+            if not ok:
+                return True
+            if not pin and e.kind != "unknown":
+                QMessageBox.warning(self, T("Error"), T("The active profile has a FIDO PIN: it is needed."))
+                return True
+            self._run(lambda p: op(pin or None, not pin, p), then=then, touch=True, refresh=refresh)
+            return True
+        self._run(lambda p: op(typed or None, no_pin, p), then=then, touch=True, refresh=refresh, on_error=on_error)
 
     def refresh(self):
         if self.busy:
@@ -464,7 +562,8 @@ class MainWindow(QMainWindow):
                 if self.mgmt:
                     self.mgmt.close()
                 self.mgmt = Management.open(self.reader_box.currentText())
-            self.info = self.mgmt.info()
+            # (no transaction: the GUI thread must not wait for another program's)
+            self.info = self.mgmt.info(lock=False)
         except Exception as e:
             self.mgmt = None
             self.statusBar().showMessage(str(e))
@@ -485,12 +584,14 @@ class MainWindow(QMainWindow):
             swatch = QTableWidgetItem("")
             swatch.setBackground(QColor("#" + p["color"]))
             self.table.setItem(r, 1, swatch)
-            self.table.setItem(r, 2, QTableWidgetItem(p["name"] if p["used"] else ""))
+            self.table.setItem(r, 2, QTableWidgetItem(display_name(p["name"]) if p["used"] else ""))
             state = T("empty")
             if p["used"]:
                 state = T("active") if r == info.get("active") else T("in use")
             self.table.setItem(r, 3, QTableWidgetItem(state))
-            self.table.setItem(r, 4, QTableWidgetItem(T("blocked") if p["no_export"] else T("allowed")))
+            export = T("secure profile") if p["used"] and p.get("secure") else \
+                (T("blocked") if p["no_export"] else T("allowed"))
+            self.table.setItem(r, 4, QTableWidgetItem(export))
         if "button_slots" in info:
             self.slots_spin.setValue(info["button_slots"])
         fw = info.get("firmware_slot")
@@ -502,6 +603,7 @@ class MainWindow(QMainWindow):
                 text += " " + T("The previous firmware can be restored.")
             self.fw_state.setText(text)
             self.fw_state.setStyleSheet("color:#b70;" if fw["unconfirmed"] else "")
+        self.security_tab.show_info(info)
 
     def _show_health(self, h):
         for i, (key, title) in enumerate(HEALTH_LABELS.items()):
@@ -520,12 +622,48 @@ class MainWindow(QMainWindow):
         rows = self.table.selectionModel().selectedRows()
         return rows[0].row() if rows else None
 
+    def _ready(self):
+        """No operation running and a device connected (says so otherwise)."""
+        if self.busy:
+            return False
+        if self.mgmt is None:
+            QMessageBox.warning(self, T("Error"), T("No device"))
+            return False
+        return True
+
+    def _change_touch(self):
+        """Whether a name, colour, button slot or board change needs a touch:
+        once the free changes (INFO key 18) are used up (unknown: assume so)."""
+        left = (self.info or {}).get("free_changes")
+        return left is None or left == 0
+
+    def _update_pin(self):
+        """PIN typed for a firmware update or rollback and the ROM loader, and
+        whether the device checks none (safe mode: its key storage is not
+        open). The field is emptied at once: a PIN typed once must not serve
+        a later click by someone else at this computer."""
+        typed = self.fw_pin.text()
+        self.fw_pin.clear()
+        if (self.info or {}).get("boot_status", "ok") != "ok":
+            return None, True
+        return typed, False
+
     # -- actions -------------------------------------------------------------
     def _reboot(self, bootloader):
-        self._run(lambda p: self.mgmt.reboot(bootloader=bootloader), reboots=not bootloader)
+        typed, no_pin = self._update_pin()
+        if not self._ready():
+            return
+        if not bootloader:
+            self._run(lambda p: self.mgmt.reboot(), touch=True, reboots=True)
+            return
+        if (self.info or {}).get("protocol", 1) < 2:
+            typed, no_pin = None, True          # older firmware: no PIN for the ROM loader
+        self._run_pin(lambda pin, no_pin, p: self.mgmt.reboot(bootloader=True, pin=pin, no_pin=no_pin),
+                      typed, no_pin)
 
     def _update_firmware(self):
-        if self.mgmt is None or not self.info:
+        typed_pin, no_pin = self._update_pin()
+        if self.mgmt is None or not self.info or self.busy:
             return
         path, _ = QFileDialog.getOpenFileName(self, T("Firmware image"), "", "Firmware (*.bin);;*")
         if not path:
@@ -535,29 +673,42 @@ class MainWindow(QMainWindow):
                 image = f.read()
             desc = firmware.parse(image)
         except (OSError, firmware.FirmwareError) as e:
-            QMessageBox.critical(self, T("Error"), str(e))
+            QMessageBox.critical(self, T("Error"), _plain(str(e)))
             return
         running = self.info.get("firmware_slot", {}).get("version", self.info["firmware"])
         question = T("Install firmware %s (%s, %s build) over %s?\n\nKey storage is not touched. If the new "
                      "firmware does not start, the key returns to the current one at the next restart.") % (
-            desc["version"], desc["platform"], desc["build_profile"], running)
-        if QMessageBox.question(self, T("Firmware update"), question) != QMessageBox.StandardButton.Yes:
+            desc["version"], desc["platform"], desc["build_profile"], display_name(running))
+        if QMessageBox.question(self, T("Firmware update"), _plain(question)) != QMessageBox.StandardButton.Yes:
             return
-        downgrade = firmware.compare(desc["version_tuple"], tuple(int(x) for x in running.split("."))) < 0
+        try:
+            downgrade = firmware.compare(desc["version_tuple"], tuple(int(x) for x in running.split("."))) < 0
+        except ValueError:
+            downgrade = False                   # the device decides
         if downgrade and QMessageBox.question(
                 self, T("Firmware update"),
                 T("This image is older than the running firmware. Install it anyway?")) != QMessageBox.StandardButton.Yes:
             return
-        pin = self.fw_pin.text() or None
-        self._run(lambda p: self.mgmt.update_firmware(image, pin=pin, allow_downgrade=downgrade, progress=p),
-                  then=lambda r: QMessageBox.information(self, T("Firmware updated"), r["installed"]),
-                  touch=True, refresh=True)
+        self._run_pin(lambda pin, no_pin, p: self.mgmt.update_firmware(image, pin=pin, allow_downgrade=downgrade,
+                                                                       progress=p, no_pin=no_pin),
+                      typed_pin, no_pin,
+                      then=lambda r: (QMessageBox.warning(self, T("Firmware update"), _plain(r["warning"]))
+                                      if r.get("warning") else
+                                      QMessageBox.information(self, T("Firmware updated"), r["installed"])),
+                      refresh=True)
 
     def _confirm_firmware(self):
+        self.fw_pin.clear()                     # a PIN typed here is not kept for a later click
         self._run(lambda p: self.mgmt.confirm_firmware(), refresh=True)
 
     def _rollback_firmware(self):
-        self._run(lambda p: self.mgmt.rollback_firmware(), touch=True, refresh=True)
+        typed, no_pin = self._update_pin()
+        if not self._ready():
+            return
+        if (self.info or {}).get("protocol", 1) < 2:
+            typed, no_pin = None, True          # older firmware: no PIN for a rollback
+        self._run_pin(lambda pin, no_pin, p: self.mgmt.rollback_firmware(pin=pin, no_pin=no_pin),
+                      typed, no_pin, refresh=True)
 
     def _factory_reset(self):
         text, ok = QInputDialog.getText(self, T("Factory reset..."), T("Type 'erase' to erase every profile and key:"))
@@ -567,7 +718,7 @@ class MainWindow(QMainWindow):
     def _switch(self):
         s = self._selected_slot()
         if s is not None:
-            self._run(lambda p: self.mgmt.select_profile(s), reboots=True)
+            self._run(lambda p: self.mgmt.select_profile(s), touch=True, reboots=True)
 
     def _rename(self):
         s = self._selected_slot()
@@ -575,7 +726,8 @@ class MainWindow(QMainWindow):
             return
         name, ok = QInputDialog.getText(self, T("Rename..."), T("Profile name:"))
         if ok:
-            self._run(lambda p: self.mgmt.set_profile(s, name=name[:23]), refresh=True)
+            name = clip_name(name)              # the slot holds 23 bytes of UTF-8
+            self._run(lambda p: self.mgmt.set_profile(s, name=name), touch=self._change_touch(), refresh=True)
 
     def _colour(self):
         s = self._selected_slot()
@@ -584,24 +736,31 @@ class MainWindow(QMainWindow):
         c = QColorDialog.getColor(parent=self)
         if c.isValid():
             hexc = "%02x%02x%02x" % (c.red(), c.green(), c.blue())
-            self._run(lambda p: self.mgmt.set_profile(s, color=hexc), refresh=True)
+            self._run(lambda p: self.mgmt.set_profile(s, color=hexc), touch=self._change_touch(), refresh=True)
+
+    def _profile(self, s):
+        """What the device reported about slot s (None in safe mode)."""
+        profiles = (self.info or {}).get("profiles") or []
+        return profiles[s] if s is not None and s < len(profiles) else None
 
     def _toggle_export(self):
         s = self._selected_slot()
-        if s is None or not self.info:
+        prof = self._profile(s)
+        if prof is None:
             return
-        blocked = self.info["profiles"][s]["no_export"]
-        self._run(lambda p: self.mgmt.set_profile(s, no_export=not blocked), touch=blocked, refresh=True)
+        blocked = prof["no_export"]
+        self._run(lambda p: self.mgmt.set_profile(s, no_export=not blocked), touch=True, refresh=True)
 
     def _wipe(self):
         s = self._selected_slot()
         if s is None:
             return
-        used = self.info and self.info["profiles"][s]["used"]
+        prof = self._profile(s)
+        used = bool(prof and prof["used"])
         if used and QMessageBox.question(self, T("Create / wipe"), T("Create / wipe") + " %d ?" % (s + 1)) \
                 != QMessageBox.StandardButton.Yes:
             return
-        self._run(lambda p: self.mgmt.wipe_profile(s), touch=bool(used), reboots=True)
+        self._run(lambda p: self.mgmt.wipe_profile(s), touch=True, reboots=True)     # (creating one too)
 
     def _delete(self):
         s = self._selected_slot()
@@ -611,89 +770,174 @@ class MainWindow(QMainWindow):
             self._run(lambda p: self.mgmt.delete_profile(s), touch=True, reboots=True)
 
     def _export(self):
+        # Take the secrets out of the fields at once, whatever happens next:
+        # nothing typed is kept for a later click by someone else.
+        encrypt = self.enc_check.isChecked()
+        pass1, pass2, typed_pin = self.pass1.text(), self.pass2.text(), self.pin_edit.text()
+        for field in (self.pass1, self.pass2, self.pin_edit):
+            field.clear()
+        if not self._ready():
+            return
         passphrase = None
-        if self.enc_check.isChecked():
-            if self.pass1.text() != self.pass2.text() or not self.pass1.text():
-                QMessageBox.warning(self, T("Error"), T("Passphrases differ"))
+        if encrypt:
+            if pass1 != pass2 or not pass1:
+                QMessageBox.warning(self, T("Error"), T("Passphrases differ") if pass1 != pass2 else
+                                    T("Enter a passphrase"))
                 return
-            passphrase = self.pass1.text()
+            passphrase = pass1
+        elif QMessageBox.question(
+                self, T("Export to file..."),
+                T("The backup will NOT be encrypted: anyone with the file has your keys. Continue?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
         path, _ = QFileDialog.getSaveFileName(self, T("Export to file..."), "librefido-profile.lfbk",
                                               "LibreFido backup (*.lfbk)")
         if not path:
             return
-        pin = self.pin_edit.text() or None
+        encrypted = passphrase is not None
 
-        def work(progress):
-            stream = self.mgmt.export_profile(pin=pin, progress=progress)
-            write_file(path, stream, passphrase)
-            return path
+        def export(pin, no_pin, progress):
+            stream = self.mgmt.export_profile(pin=pin, progress=progress, no_pin=no_pin)
+            notes = []
+            write_file(path, stream, passphrase, warn=notes.append)
+            return path, notes
 
-        def done(p):
-            msg = T("Backup file written") + ": " + p
-            if not passphrase:
+        def done(r):                            # (holds no secret: it lives as long as the Job)
+            p, notes = r
+            msg = T("Backup file written") + ":\n" + p
+            if not encrypted:
                 msg += "\n\n" + T("NOT encrypted: anyone with this file has your keys.")
-            QMessageBox.information(self, T("Done"), msg)
-        self._run(work, then=done, touch=True)
+            for n in notes:
+                msg += "\n\n" + n
+            QMessageBox.information(self, T("Done"), _plain(msg))
+        self._run_pin(export, typed_pin, False, then=done)
 
-    def _load_backup(self):
-        path, _ = QFileDialog.getOpenFileName(self, T("Open and verify..."), "", "LibreFido backup (*.lfbk)")
-        if not path:
-            return None, None
+    def _load_backup(self, title, then, path=None):
+        """Reads a backup file (asked for unless path is given), asks for its
+        passphrase and verifies it in a worker thread (the key derivation
+        takes a while); then(info, stream, path) runs afterwards on the GUI
+        thread. Returns whether it started."""
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(self, title, "", "LibreFido backup (*.lfbk)")
+            if not path:
+                return False
         try:
-            info, stream = read_file(path)
-            if info["encrypted"]:
-                pw, ok = QInputDialog.getText(self, T("Passphrase"), T("Passphrase") + ":", QLineEdit.EchoMode.Password)
-                if not ok:
-                    return None, None
-                info, stream = read_file(path, pw)
-        except BackupError as e:
-            QMessageBox.critical(self, T("Error"), str(e))
-            return None, None
-        return info, stream
+            with open(path, "rb") as f:
+                blob = f.read()                 # read once: the file cannot change between the steps
+            head, _ = read_file(blob)
+        except (BackupError, OSError) as e:
+            QMessageBox.critical(self, T("Error"), _plain(str(e)))
+            return False
+        if head["encrypted"]:
+            pw, ok = QInputDialog.getText(self, T("Passphrase"), T("Passphrase") + ":", QLineEdit.EchoMode.Password)
+            if not ok:
+                return False
+            work = lambda p: read_file(blob, pw, require_encryption=True)   # noqa: E731
+        else:
+            work = lambda p: read_file(blob)    # noqa: E731
+        return self._run(work, then=lambda r: then(r[0], r[1], path), device=False)
 
     def _verify_file(self):
-        info, stream = self._load_backup()
-        if stream is None:
+        # Forget the previous backup first: a file that fails to load (or a
+        # cancelled dialog) must not leave it in place for the device checks.
+        if self.busy:
             return
-        self.loaded_stream = stream
+        self.loaded_path = None
+        self.verify_out.clear()
+        self._load_backup(T("Open and verify..."), self._show_verified)
+
+    def _show_verified(self, info, stream, path):
         s = info["summary"]
         h = s["header"]
-        lines = [T("Backup OK"), "",
-                 "UUID: %s" % h["uuid"], "%s: %s" % (T("Name"), h["name"]), "Serial: %s" % h["serial"],
-                 "Firmware: %s (min %s)" % (h["firmware"], h["min_firmware"]),
+        title, notes = T("Backup OK"), []
+        running = (self.info or {}).get("firmware")
+        if running and not firmware_supports(running, h["min_firmware"]):
+            title = T("Warning")
+            notes.append(T("The connected device (firmware %s) cannot import it: it needs %s or newer.")
+                         % (display_name(running), h["min_firmware"]))
+        elif not running and not firmware_supports(__version__, h["min_firmware"]):
+            title = T("Warning")
+            notes.append(T("This backup needs firmware %s or newer.") % h["min_firmware"])
+        if not info["encrypted"]:
+            notes.append(T("NOT encrypted: nothing proves this file was not modified."))
+        lines = [title, path] + notes + [
+                 "", "UUID: %s" % h["uuid"], "%s: %s" % (T("Name"), display_name(h["name"])),
+                 "Serial: %s" % h["serial"], "Firmware: %s (min %s)" % (h["firmware"], h["min_firmware"]),
                  "Encrypted: %s" % info["encrypted"], "Root key: %s" % s["root_key"],
                  "Files: %d" % s["files"], "FIDO resident credentials: %d" % s["resident_credentials"],
                  "OATH credentials: %d" % s["oath_credentials"], "Counters: %s" % s["counters"],
                  "By application: %s" % s["by_application"]]
         self.verify_out.setPlainText("\n".join(lines))
+        self.loaded_path = path             # only the path: the stream is not kept
+
+    def _cannot_import(self, h):
+        """True (after saying so) when the connected device cannot import a
+        backup with header h: its firmware is older than the backup needs."""
+        running = (self.info or {}).get("firmware")
+        if running and not firmware_supports(running, h["min_firmware"]):
+            QMessageBox.critical(self, T("Error"), _plain(
+                T("The connected device (firmware %s) cannot import it: it needs %s or newer.")
+                % (display_name(running), h["min_firmware"])))
+            return True
+        return False
 
     def _device_check(self, restore_test):
-        if self.loaded_stream is None:
-            self._verify_file()
-            if self.loaded_stream is None:
+        if not self._ready():
+            return
+
+        def check(info, stream, path):
+            if not self._ready() or self._cannot_import(info["summary"]["header"]):
                 return
-        stream = self.loaded_stream
-        if restore_test:
-            def work(progress):
-                return self.mgmt.restore_test(stream, progress=progress)[1]
-            self._run(work, then=lambda ok: QMessageBox.information(
-                self, T("Done"), T("Restore test passed: the backup can be restored.") if ok else
-                T("Restore test FAILED.")), refresh=True)
-        else:
-            self._run(lambda p: self.mgmt.check_backup(stream, progress=p),
-                      then=lambda r: QMessageBox.information(self, T("Done"), T("The firmware accepts this backup.")))
+            name = os.path.basename(path)
+            if restore_test:
+                self._run(lambda p: self.mgmt.restore_test(stream, progress=p)[1],
+                          then=lambda ok: QMessageBox.information(
+                              self, T("Done"), (T("Restore test passed: the backup can be restored.") if ok else
+                                                T("Restore test FAILED.")) + "\n" + name), touch=True, refresh=True)
+            else:
+                self._run(lambda p: self.mgmt.check_backup(stream, progress=p),
+                          then=lambda r: QMessageBox.information(
+                              self, T("Done"), T("The firmware accepts this backup.") + "\n" + name))
+        # The last verified file is read (and decrypted) again: its stream was not kept.
+        self._load_backup(T("Open and verify..."), check, path=self.loaded_path)
 
     def _import(self):
-        info, stream = self._load_backup()
-        if stream is None:
+        if not self._ready():
             return
-        target = self.target_spin.value() - 1
-        used = self.info and self.info["profiles"][target]["used"]
+        self._load_backup(T("Import..."), self._import_loaded)
 
-        def work(progress):
-            return self.mgmt.import_profile(stream, target, progress=progress)
-        self._run(work, then=lambda r: QMessageBox.information(self, T("Done"), T("Imported") + ": %d files" % r["files"]),
-                  touch=bool(used), refresh=True)
+    def _import_loaded(self, info, stream, path):
+        if not self._ready():
+            return
+        yes, no = QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No
+        if not info["encrypted"] and QMessageBox.warning(
+                self, T("Import..."), T("This backup is NOT encrypted, so nothing proves it was not replaced by "
+                                        "someone who could write the file. Import it anyway?"),
+                yes | no, no) != yes:
+            return
+        h = info["summary"]["header"]
+        if self._cannot_import(h):
+            return
+        backup = "%s (%s, UUID %s, %d files)" % (display_name(os.path.basename(path)), display_name(h["name"]) or "-",
+                                                 h["uuid"], info["summary"]["files"])
+        target = self.target_spin.value() - 1
+        prof = self._profile(target)
+        # The first line is fixed text: Qt then shows the names as plain text.
+        if prof and prof["used"]:
+            question = T("Replace slot %d?") % (target + 1) + "\n\n" + \
+                T("Slot %d (%s) is in use. Importing %s replaces it and erases its keys for good.") % (
+                    target + 1, display_name(prof["name"]) or "-", backup)
+        else:
+            question = T("Import into slot %d?") % (target + 1) + "\n\n" + backup
+        if QMessageBox.question(self, T("Import..."), question, yes | no, no) != yes:
+            return
+        # (an import into the active profile asks for its FIDO PIN from protocol 3 on)
+        self._run_pin(lambda pin, no_pin, p: self.mgmt.import_profile(stream, target, progress=p, pin=pin,
+                                                                      no_pin=no_pin),
+                      None, False,
+                      then=lambda r: QMessageBox.information(self, T("Done"), T("Imported") + ": %d files" % r["files"]),
+                      refresh=True)
 
 
 def main():

@@ -7,10 +7,12 @@ interface.
 """
 
 import time
+from contextlib import contextmanager
 
 from smartcard.System import readers
 from smartcard.Exceptions import CardConnectionException, NoCardException
-from smartcard.scard import SCARD_LEAVE_CARD
+from smartcard.scard import (SCARD_LEAVE_CARD, SCARD_RESET_CARD, SCARD_S_SUCCESS, SCARD_W_RESET_CARD,
+                             SCardBeginTransaction, SCardEndTransaction, SCardGetErrorMessage)
 
 # Proprietary, unregistered AID (ISO/IEC 7816-5 category F).
 MGMT_AID = b"\xF0LIBREFIDO"
@@ -20,8 +22,9 @@ SW_MESSAGES = {
     0x6983: "PIN blocked",
     0x6984: "data invalid (backup rejected by the device)",
     0x6985: "conditions not satisfied (touch the key when it blinks, or finish the pending operation)",
-    0x6986: "not allowed (export disabled for this profile or build)",
+    0x6986: "not allowed (by this profile, e.g. a secure one, or this build)",
     0x6A80: "incorrect parameters",
+    0x6A81: "not supported by this device",
     0x6A84: "not enough space",
     0x6A86: "incorrect P1/P2",
     0x6A88: "not found",
@@ -32,12 +35,17 @@ SW_MESSAGES = {
 
 
 class ApduError(Exception):
-    def __init__(self, sw, what=""):
+    """Status word sw from the device; message replaces the text derived from
+    it (for errors the host detects itself)."""
+
+    def __init__(self, sw, what="", message=None):
         self.sw = sw
-        msg = SW_MESSAGES.get(sw)
-        if msg is None and (sw & 0xFFF0) == 0x63C0:
-            msg = "wrong PIN, %d tries left" % (sw & 0xF)
-        super().__init__("%s%s (SW %04X)" % (what + ": " if what else "", msg or "error", sw))
+        if message is None:
+            msg = SW_MESSAGES.get(sw)
+            if msg is None and (sw & 0xFFF0) == 0x63C0:
+                msg = "wrong PIN, %d tries left" % (sw & 0xF)
+            message = "%s%s (SW %04X)" % (what + ": " if what else "", msg or "error", sw)
+        super().__init__(message)
 
 
 class Card:
@@ -47,7 +55,70 @@ class Card:
         self.conn = connection
         self.reader = reader_name
         self.boot_id = None     # changes whenever the device restarts
+        self.protocol = None    # management protocol (SELECT answer byte 2)
         self.extended = False   # extended-length APDUs work (probed by select())
+        self._locked = 0        # nesting depth of transaction()
+        self._lock_handle = None
+        self._reset = False     # end the transaction with a card reset (mark_reset)
+
+    def _handle(self):
+        """SCARDHANDLE of the pyscard connection (under its decorators)."""
+        c = self.conn
+        while not hasattr(c, "hcard") and hasattr(c, "component"):
+            c = c.component
+        return getattr(c, "hcard", None)
+
+    def mark_reset(self):
+        """The transaction in progress ends with a card reset instead of
+        leaving the card as it is: the device then drops whatever session
+        the host could not end with a command (the application is unloaded
+        before any other client's APDU)."""
+        self._reset = True
+
+    @contextmanager
+    def transaction(self, aid=None):
+        """Exclusive use of the device for a multi-APDU operation
+        (SCardBeginTransaction): no other PC/SC client of this reader can send
+        APDUs until the block ends, so none can read an export stream or slip
+        chunks into an upload of this session. It does not lock the key's
+        other interfaces (the WinUSB/WebUSB smart card interface, FIDO HID);
+        from management protocol 2 on the export ID keeps them from reading
+        an export. aid is selected first, as another client may have selected
+        another application in between. Nests; the card stays powered when it
+        ends (SCARD_LEAVE_CARD) unless mark_reset() was called. Do not prompt
+        the user inside (a touch the device waits for is fine: the APDU is in
+        progress): Windows resets a card whose transaction is idle for more
+        than 5 seconds."""
+        if self._locked == 0:
+            h = self._handle()
+            if h is None:
+                raise CardConnectionException("not connected")
+            hr = SCardBeginTransaction(h)
+            if hr == SCARD_W_RESET_CARD and hasattr(self.conn, "reconnect"):
+                # Reset by another program: the handle must acknowledge it
+                # (and keeps leaving the card powered when it disconnects).
+                self.conn.reconnect(disposition=SCARD_LEAVE_CARD)
+                h = self._handle()
+                hr = SCardBeginTransaction(h)
+            if hr != SCARD_S_SUCCESS:
+                raise CardConnectionException("cannot get exclusive access to the device: %s"
+                                              % SCardGetErrorMessage(hr), hresult=hr)
+            self._lock_handle = h
+            self._reset = False
+        self._locked += 1
+        try:
+            if aid is not None and self._locked == 1:
+                self.select(aid)
+            yield self
+        finally:
+            self._locked -= 1
+            if self._locked == 0:
+                h, self._lock_handle = self._lock_handle, None
+                disposition, self._reset = (SCARD_RESET_CARD if self._reset else SCARD_LEAVE_CARD), False
+                try:
+                    SCardEndTransaction(h, disposition)     # fails harmlessly once the device restarted
+                except Exception:
+                    pass
 
     def _extended(self, cla, ins, p1, p2, data, le):
         apdu = [cla, ins, p1, p2, 0, len(data) >> 8, len(data) & 0xFF] + list(data)
@@ -153,6 +224,7 @@ def open_device(reader=None, timeout=0.0, not_boot_id=None):
             try:
                 answer, _ = card.select(MGMT_AID)
                 card.boot_id = answer[4:8] if len(answer) >= 8 else None
+                card.protocol = answer[2] if len(answer) >= 3 and answer[:2] == b"LF" else None
                 if not_boot_id is not None and card.boot_id == not_boot_id:
                     card.close()
                     continue
