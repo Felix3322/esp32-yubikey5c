@@ -83,8 +83,10 @@ and run separately on the default ports.
 | fixed-port tests (earlier-firmware baselines, default ports) | 53 passed, 1 skipped | — |
 
 ¹ tests that need fixed ports; they pass in the fixed-port run.
-² `tests/storage`, `tests/profiles`, `tests/isolation` under ASan: see the
-commit that updates this table.
+² `tests/storage`, `tests/profiles`, `tests/isolation` under ASan: the run of
+this revision collided with an orphaned emulator of another test slot (the
+slot runner now removes such orphans) and its re-run was interrupted; the
+previous revision's ASan run of these suites had no sanitizer report.
 
 Earlier findings of the fuzzer, fixed: a division by zero reachable without
 authentication in the secure-messaging path of OpenPGP/PIV, and a
@@ -103,5 +105,11 @@ applications, adds and calculates OATH TOTP/HOTP accounts (codes match RFC
   profile switch by holding the button 5 s (new USB serial), reboot into the
   ROM loader and back. It found two bugs the emulator could not (main task
   stack overflow on first boot, CCID reader name), both fixed.
-- Firmware 2.0.1 (this revision): builds for ESP32-S3 (STANDARD and
-  HARDENED, no warnings in LibreFido code); not yet run on the board.
+- 2026-09-24, firmware 2.0.1 (this revision), same board, flashed over the
+  data of 2.0.0 with the Windows esptool (16 MB backup taken first): boots,
+  both existing profiles and their identities kept, management protocol 3,
+  key store unlocked, storage health scrub of 128 sectors without a single
+  error, OATH TOTP added / calculated (equal to RFC 6238 computed on the
+  host) / deleted over PC/SC, OpenPGP and PIV selected (corrected PIV
+  application template). WebAuthn, the button-driven features and OTP
+  typing on this build are still to be checked on the board.
