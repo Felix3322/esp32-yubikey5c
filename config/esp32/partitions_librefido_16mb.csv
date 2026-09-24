@@ -1,0 +1,28 @@
+# LibreFido 2 flash layout for ESP32-S3 modules with 16 MB flash (e.g. N16R8).
+#
+#  ota_0 / ota_1  two firmware slots: an update is written to the inactive slot
+#                 and the bootloader rolls back if the new image does not
+#                 confirm itself, so a failed update never touches key storage.
+#  part0          store of firmware before LibreFido 2 (same offset, size and
+#                 name as the old table). Read once to migrate, then left alone.
+#  lfsys          system area: profile table, active profile, board settings.
+#  lfstage        staging area for imports/exports/migration.
+#  lfr0 .. lfr4   profile stores (4 profiles + 1 spare for copy-on-write
+#                 imports and wipes).
+#
+# Only bootloader, partition table and the app slots are written by a normal
+# flash. `idf.py erase-flash` or `esptool.py erase_flash` destroys every key.
+#
+# Name,     Type, SubType, Offset,    Size,      Flags
+nvs,        data, nvs,     0x9000,    0x5000,
+otadata,    data, ota,     0xe000,    0x2000,
+ota_0,      app,  ota_0,   0x10000,   0x1f0000,
+part0,      0x40, 0x01,    0x200000,  0x100000,
+ota_1,      app,  ota_1,   0x300000,  0x1f0000,
+lfsys,      0x40, 0x10,    0x4f0000,  0x10000,
+lfstage,    0x40, 0x11,    0x500000,  0x80000,
+lfr0,       0x40, 0x20,    0x580000,  0x180000,
+lfr1,       0x40, 0x21,    0x700000,  0x180000,
+lfr2,       0x40, 0x22,    0x880000,  0x180000,
+lfr3,       0x40, 0x23,    0xa00000,  0x180000,
+lfr4,       0x40, 0x24,    0xb80000,  0x180000,
