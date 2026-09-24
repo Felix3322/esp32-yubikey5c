@@ -128,6 +128,7 @@ def test_fresh_device(pcscd, emulators):
     try:
         # LibreFido's own model identifier, never another vendor's
         assert bytes(c.info.aaguid).hex() == "08c228d97ea02bc8d08e0d22a6d13f7d"
+        assert c.info.transports == ["usb"]
     finally:
         dev.close()
     m.close()
