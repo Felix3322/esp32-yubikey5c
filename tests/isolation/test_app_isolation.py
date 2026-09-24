@@ -286,6 +286,81 @@ def test_piv_administration_needs_the_management_key(device):
         card.close()
 
 
+def test_vendor_key_restore_needs_touch_and_pin(pcscd, tmp_path):
+    """The vendor command that replaces the device key (every credential
+    goes) was open to any host."""
+    from fido2 import cbor
+    from fido2.ctap import CtapError
+    from fido2.ctap2 import ClientPin
+    from harness.emulator import Button
+    import threading
+    import time
+
+    def touching(fn):
+        """Runs fn while the button is pressed every 0.3 s."""
+        done = threading.Event()
+
+        def press():
+            b = Button()
+            while not done.wait(0.3):
+                b.press(0.05)
+            b.close()
+        t = threading.Thread(target=press)
+        t.start()
+        try:
+            return fn()
+        finally:
+            done.set()
+            t.join()
+
+    e = Emulator(workdir=str(tmp_path / "v"), env={"LF_EMU_UP": "manual", "LF_EMU_UP_TIMEOUT_MS": "1500"})
+    e.start()
+    try:
+        touching(lambda: fido_make(b"alice"))
+        restore = bytes([0x01]) + cbor.encode({1: 0x02, 2: {1: os.urandom(60)}})
+        dev = ctaphid.open_device()
+        try:
+            # vendor CBOR command: the answer starts with the CTAP status
+            status = dev.call(0x41, restore)[0]           # nobody touches
+            assert status in (CtapError.ERR.USER_ACTION_TIMEOUT, CtapError.ERR.OPERATION_DENIED), hex(status)
+            ClientPin(Ctap2(dev)).set_pin("123456")
+            status = dev.call(0x41, restore)[0]           # PIN set, no token
+            assert status == CtapError.ERR.PUAT_REQUIRED, hex(status)
+        finally:
+            dev.close()
+        assert touching(fido_users) == {b"alice"}       # device key untouched
+    finally:
+        e.stop()
+
+
+def test_rescue_maintenance_needs_a_touch(pcscd, tmp_path):
+    """Signing with the device key and replacing the device certificate
+    through the rescue applet were open to any host."""
+    import threading
+    from harness.emulator import Button
+    rescue_aid = bytes.fromhex("A0583FC19B7E4F21")
+    e = Emulator(workdir=str(tmp_path / "r"), env={"LF_EMU_UP": "manual", "LF_EMU_UP_TIMEOUT_MS": "1000"})
+    e.start()
+    try:
+        Management.open(timeout=15).close()
+        card = Card()
+        try:
+            card.select(rescue_aid)
+            for p1, data in ((0x01, bytes(32)), (0x03, b"\x30\x03\x02\x01\x00")):
+                with pytest.raises(ApduError) as err:
+                    card.transmit(0x80, 0x10, p1, 0x00, data)
+                assert err.value.sw == 0x6985, "P1 %02X: %04X" % (p1, err.value.sw)
+            t = threading.Thread(target=lambda: (__import__("time").sleep(0.3), Button().press()))
+            t.start()
+            sig, _ = card.transmit(0x80, 0x10, 0x01, 0x00, bytes(32), le=0)
+            t.join()
+            assert len(sig) == 64
+        finally:
+            card.close()
+    finally:
+        e.stop()
+
+
 def test_piv_and_openpgp_do_not_share_files(device):
     pgp_pub = pgp_generate()
     pgp_sign(pgp_pub)
