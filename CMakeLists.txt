@@ -21,7 +21,11 @@ set(USB_VID 0x1D50)
 set(USB_PID 0x619B)
 
 if(ESP_PLATFORM)
-    set(DEBUG_APDU 1)
+    # APDU tracing prints PINs and imported keys to the console: only on
+    # request (idf.py -DDEBUG_APDU=1 build), never by default.
+    if(NOT DEFINED DEBUG_APDU)
+        set(DEBUG_APDU 0)
+    endif()
     set(EXTRA_COMPONENT_DIRS
         src/fido2
         pico-keys-sdk/src
