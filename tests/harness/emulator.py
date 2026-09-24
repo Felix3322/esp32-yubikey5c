@@ -82,9 +82,12 @@ class Emulator:
     def __init__(self, binary=None, workdir=None, env=None):
         self.binary = binary or os.environ.get("LF_EMU_BIN") or os.path.join(REPO_ROOT, "build-emu", "pico_fido2")
         self.workdir = workdir or tempfile.mkdtemp(prefix="lf-emu-")
+        os.makedirs(self.workdir, exist_ok=True)
         self.extra_env = dict(env or {})
         self.proc = None
         self.log_path = os.path.join(self.workdir, "emulator.log")
+        self.starts = 0     # processes started with this log
+        self.log_start = 0  # log offset where the current process began
 
     @property
     def flash_path(self):
@@ -97,12 +100,17 @@ class Emulator:
     def start(self, **env):
         if self.proc:
             return
+        if _port_open(HID_PORT):
+            raise RuntimeError("HID port %d is taken: another emulator is still running" % HID_PORT)
         e = dict(os.environ)
         e.update(self.extra_env)
         e.update({k: str(v) for k, v in env.items()})
         e["PICO_FLASH_FILE"] = self.flash_path
         e["PICO_EFUSE_FILE"] = self.efuse_path
         self._log = open(self.log_path, "a")
+        self._log.flush()
+        self.log_start = os.path.getsize(self.log_path)
+        self.starts += 1
         self.proc = subprocess.Popen([self.binary], cwd=self.workdir, env=e,
                                      stdout=self._log, stderr=subprocess.STDOUT)
         if not _wait_port(HID_PORT, 10):
