@@ -6,4 +6,4 @@ convenience (exportable, clonable profiles). Do not keep anything valuable
 on it.
 """
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
