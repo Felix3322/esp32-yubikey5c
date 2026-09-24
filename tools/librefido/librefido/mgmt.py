@@ -22,7 +22,7 @@ PROFILE_F_NO_EXPORT = 0x01
 BOOT_STATUS = ["ok", "partition table too old", "system area unreadable",
                "legacy store not migrated", "active profile not mountable"]
 RESULTS = ["none", "migrated", "imported", "import failed", "wiped", "deleted", "operation failed",
-           "backup restore test passed", "backup restore test FAILED"]
+           "backup restore test passed", "backup restore test FAILED", "created"]
 PENDING = ["none", "import", "wipe", "delete", "restore test"]
 DRK_SOURCES = ["none (legacy)", "legacy eFuse", "flash (not bound to the chip)", "flash, bound to HMAC eFuse key"]
 
