@@ -1,0 +1,99 @@
+menu "LibreFido"
+
+    choice LIBREFIDO_PROFILE
+        prompt "Build profile"
+        default LIBREFIDO_PROFILE_STANDARD
+        help
+            DEVELOPMENT: easy reflashing, verbose logs, never ship.
+            STANDARD: profiles, backups and clones; keys protected at rest by the
+            root key (bind it to the chip with `librefido provision bind-root-key`).
+            HARDENED: nothing leaves the device; the key store stays locked unless
+            Secure Boot, flash encryption (release), JTAG off, secure download
+            mode, anti-rollback and the chip-bound root key are all in place.
+            The CMake variable LIBREFIDO_PROFILE overrides this choice.
+
+        config LIBREFIDO_PROFILE_DEVELOPMENT
+            bool "Development"
+        config LIBREFIDO_PROFILE_STANDARD
+            bool "Standard"
+        config LIBREFIDO_PROFILE_HARDENED
+            bool "Hardened (non-exportable, hardware-bound)"
+    endchoice
+
+    config LIBREFIDO_DEV_AUTO_UP
+        bool "Accept user presence without a button (development boards without a button)"
+        depends on LIBREFIDO_PROFILE_DEVELOPMENT
+        default n
+        help
+            Every presence request succeeds at once. For bring-up of boards
+            without a button only; any host software can then use the keys.
+
+    menu "User presence button"
+        config LIBREFIDO_UP_BUTTON_GPIO
+            int "Button GPIO"
+            range 0 48
+            default 0
+            help
+                GPIO0 is the BOOT button of Espressif dev kits. It is a strapping
+                pin: holding it while the board resets enters the ROM loader,
+                which is harmless (release it and reset) and also the recovery
+                path. Avoid GPIO 26-37 on modules with octal flash/PSRAM (N16R8)
+                and GPIO 19/20 (USB).
+
+        config LIBREFIDO_UP_BUTTON_ACTIVE_HIGH
+            bool "Button is active high"
+            default n
+            help
+                Off: pressed pulls the pin low (dev kit BOOT button).
+
+        choice LIBREFIDO_UP_BUTTON_PULL
+            prompt "Internal pull resistor"
+            default LIBREFIDO_UP_BUTTON_PULL_UP
+            config LIBREFIDO_UP_BUTTON_PULL_UP
+                bool "Pull-up"
+            config LIBREFIDO_UP_BUTTON_PULL_DOWN
+                bool "Pull-down"
+            config LIBREFIDO_UP_BUTTON_PULL_NONE
+                bool "None (external resistor)"
+        endchoice
+
+        config LIBREFIDO_UP_DEBOUNCE_MS
+            int "Debounce time (ms)"
+            range 5 200
+            default 30
+
+        config LIBREFIDO_UP_TIMEOUT_S
+            int "Presence request timeout (s)"
+            range 5 120
+            default 30
+    endmenu
+
+    menu "Status LED"
+        config LIBREFIDO_LED_GPIO
+            int "RGB LED (WS2812) GPIO, -1 for none"
+            range -1 48
+            default 48
+            help
+                GPIO48 on ESP32-S3-DevKitC-1 v1.0, GPIO38 on v1.1.
+    endmenu
+
+    menu "Chip security"
+        config LIBREFIDO_HMAC_KEY_BLOCK
+            int "eFuse key block for the root key binding (BLOCK_KEY0..5)"
+            range 0 5
+            default 5
+            help
+                Used only by `librefido provision bind-root-key` (explicit, touch
+                confirmed). Keep BLOCK_KEY0..2 free for Secure Boot digests and a
+                block for the flash encryption key.
+
+        config LIBREFIDO_LEGACY_EFUSE_AUTOPROVISION
+            bool "Burn legacy OTP keys automatically at first boot (pre-2.0 behaviour)"
+            default n
+            help
+                The original firmware burned two key blocks on first boot. LibreFido
+                never writes eFuses on its own; enable only to reproduce the old
+                behaviour on a board you can lose.
+    endmenu
+
+endmenu

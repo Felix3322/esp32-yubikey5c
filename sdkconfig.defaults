@@ -16,7 +16,9 @@ CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_WL_SECTOR_SIZE_512=y
 CONFIG_WL_SECTOR_MODE_PERF=y
-COMPILER_OPTIMIZATION="Performance"
+# -O2 for the whole firmware (this line used to lack the CONFIG_ prefix, so
+# the build silently used the IDF default -Og).
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
 CONFIG_MBEDTLS_CMAC_C=y
 CONFIG_MBEDTLS_CHACHA20_C=y
@@ -59,6 +61,9 @@ CONFIG_MBEDTLS_TLS_DISABLED=y
 
 # No core dumps: a dump of RAM can contain keys (docs/SECURITY_ARCHITECTURE.md).
 CONFIG_ESP_COREDUMP_ENABLE_TO_NONE=y
+# No PSRAM in the heap: key material must only ever be in internal SRAM
+# (external PSRAM is readable on the bus and not covered by flash encryption).
+# CONFIG_SPIRAM is not set
 
 # Storage bring-up (journaled commits, RS parity) runs on the main task.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384

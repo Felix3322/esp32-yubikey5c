@@ -16,7 +16,9 @@
 
 #include "pico_keys.h"
 #include "security.h"
+#include "otp.h"
 #include <stdio.h>
+#include "fido/files.h"
 #ifdef LF_STORE_V2
 #include "lf_mgmt.h"
 #endif
@@ -25,10 +27,43 @@ extern int scan_files_fido();
 extern void init_otp();
 extern uint16_t fido_export_pin_check(const uint8_t *pin, uint16_t len);
 
-/* Runs once at boot, after the store, the device root and USB are up.
- * Key material is only created or loaded when the key store is unlocked;
- * a HARDENED build on an incompletely provisioned chip stays inert. */
+#ifdef LF_STORE_V2
+/* PIN check of the management applet (export, import into the active slot,
+ * firmware update, rollback, ROM loader): the FIDO PIN of the mounted
+ * profile. It works while the key store is locked too, or a locked store
+ * would reduce a firmware update to a touch. The stored verifier is derived
+ * from the root key, so it can only be checked with that key loaded
+ * (otp_key_1). A root record that is present but not loaded (it cannot be
+ * unwrapped, it waits to be bound, or it was bound during this boot) would
+ * make even the right PIN mismatch, and every attempt costs a retry before
+ * the comparison: refused with 6982 before any retry is used. A legacy
+ * NO-OTP profile has no root record and was derived without one. */
+static uint16_t mgmt_pin_check(const uint8_t *pin, uint16_t len) {
+    if (!file_has_data(ef_pin)) {
+        return 0x6A88;
+    }
+    /* security_root_unavailable(): a root record exists but is not in use.
+     * A profile recorded as having no root key (the HMAC-wrapped "no root"
+     * marker) is not in that state: its verifier was derived without one. */
+    if (security_root_unavailable()) {
+        return 0x6982;
+    }
+    return fido_export_pin_check(pin, len);
+}
+#endif
+
+/* Runs once at boot, after the store and the device root are up and the
+ * USB buffers exist, but before the USB stack starts (main.c): no command
+ * can arrive while it runs. Key material is only created or loaded when the
+ * key store is unlocked; a HARDENED build on an incompletely provisioned
+ * chip stays inert. */
 int picokey_init() {
+    /* The PIN file is known whether or not the key store unlocks: getInfo
+     * reports clientPin from it, and the management PIN check needs it. */
+    ef_pin = search_by_fid(EF_PIN, NULL, SPECIFY_EF);
+#ifdef LF_STORE_V2
+    lf_mgmt_set_pin_verifier(mgmt_pin_check);
+#endif
     if (!security_keystore_unlocked()) {
         printf("[librefido] key store locked: chip security state incomplete\n");
         return PICOKEY_ERR_BLOCKED;
@@ -36,10 +71,6 @@ int picokey_init() {
     scan_files_fido();
 #ifdef ENABLE_OTP_APP
     init_otp();
-#endif
-#ifdef LF_STORE_V2
-    /* Exporting a profile asks for its FIDO PIN when one is set. */
-    lf_mgmt_set_pin_verifier(fido_export_pin_check);
 #endif
     return PICOKEY_OK;
 }
