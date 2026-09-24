@@ -179,6 +179,19 @@ def _describe(info, idx):
                                   ", the active one" if p["used"] and idx == info.get("active") else "")
 
 
+def _resolve_aaguid(value):
+    """--aaguid UUID|HEX|NAME to 16 raw bytes: a preset name
+    (policy.AAGUID_PRESETS), the UUID form or 32 hex digits. 'default' is
+    handled by the caller (None, not a call here)."""
+    for name, _, hex_value in policy.AAGUID_PRESETS:
+        if value == name:
+            return bytes.fromhex(hex_value)
+    try:
+        return policy.parse_aaguid(value)
+    except ValueError as e:
+        sys.exit("--aaguid: not a preset name and not an AAGUID (%s): %r" % (e, value))
+
+
 def cmd_list(args):
     for reader, answer in list_devices():
         print(reader)
@@ -226,6 +239,9 @@ def cmd_profile(args):
                     tags.append("[no export]")
                 if p["used"] and p.get("auto_presence"):
                     tags.append("[no touch: %s]" % ", ".join(p["auto_presence"]))
+                build_defaults = {h for name, _, h in policy.AAGUID_PRESETS if name in ("standard", "hardened")}
+                if p.get("aaguid") and p["aaguid"] not in build_defaults:
+                    tags.append("[aaguid: %s]" % policy.format_aaguid(p["aaguid"]))
                 print("%s %d  #%s  %s%s" % (mark, p["index"] + 1, p["color"], state,
                                            "".join("  " + t for t in tags)))
         elif args.action == "create-secure":
@@ -248,13 +264,22 @@ def cmd_profile(args):
         elif args.action == "set":
             if args.name is not None and clip_name(args.name) != args.name:
                 print("the name is shortened to %r (23 bytes of UTF-8)" % clip_name(args.name), file=sys.stderr)
-            # Allowing export needs a touch, other changes once the free ones are used up.
-            if args.export == "on":
-                _touch_hint("allow exporting profile %d" % args.index)
-            else:
-                _change_hint(m)
-            m.set_profile(args.index - 1, name=args.name, color=args.color,
-                          no_export=None if args.export is None else args.export == "off")
+            if args.aaguid is not None:
+                info = m.info()
+                if info.get("active") != args.index - 1:
+                    sys.exit("--aaguid only changes the AAGUID of the active profile (profile %d is not "
+                             "active); switch to it first" % args.index)
+                aaguid = None if args.aaguid == "default" else _resolve_aaguid(args.aaguid)
+                _touch_hint("set the AAGUID of %s" % _describe(info, args.index - 1))
+                m.set_aaguid(aaguid)
+            if args.name is not None or args.color is not None or args.export is not None:
+                # Allowing export needs a touch, other changes once the free ones are used up.
+                if args.export == "on":
+                    _touch_hint("allow exporting profile %d" % args.index)
+                else:
+                    _change_hint(m)
+                m.set_profile(args.index - 1, name=args.name, color=args.color,
+                              no_export=None if args.export is None else args.export == "off")
         elif args.action == "wipe":
             info = m.info()
             if _profiles(info, "wipe a profile")[args.index - 1]["used"]:
@@ -615,6 +640,11 @@ def main(argv=None):
     pr.add_argument("--name", help="at most 23 bytes of UTF-8 (longer names are shortened)")
     pr.add_argument("--color", help="RGB hex, e.g. 00c000")
     pr.add_argument("--export", choices=["on", "off"], help="allow exporting this profile")
+    pr.add_argument("--aaguid", metavar="UUID|NAME|default",
+                    help="the AAGUID this profile (must be the active one) reports from now on: a UUID "
+                         "(8-4-4-4-12 or 32 hex digits), a preset name (%s), or 'default' for the firmware's own. Never set this "
+                         "to a real vendor's AAGUID (docs/COMPATIBILITY.md); always a touch."
+                         % ", ".join(name for name, _, _ in policy.AAGUID_PRESETS))
     pr.add_argument("--yes", action="store_true", help="create-secure: replace a used slot without asking")
     pr.set_defaults(fn=cmd_profile)
 

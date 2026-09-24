@@ -9,7 +9,7 @@ import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QMessageBox,
+    QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox,
     QPushButton, QSlider, QVBoxLayout, QWidget,
 )
 
@@ -56,6 +56,20 @@ ZH = {
     "Create a secure profile in slot %d?": "在槽位 %d 中创建安全环境？",
     "Board": "板级设置",
     "LED brightness": "LED 亮度",
+    "AAGUID": "AAGUID",
+    "Firmware default": "固件默认值",
+    "Custom...": "自定义…",
+    "Set": "设置",
+    "aaguid-bad-hex": "AAGUID 格式不对：应为 16 字节，例如 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx（也可以不带连字符，32 位十六进制）。",
+    "aaguid-confirm": ("把当前环境的 AAGUID 改为 %s？\n\n"
+                       "这会改变本设备在网站看来的“型号身份”；已注册的通行密钥不受影响，"
+                       "但之后新建的通行密钥和 attestation 会带上新的 AAGUID。\n"
+                       "切勿设置成真实厂商（如 YubiKey）的 AAGUID：那是冒充，不受支持也不安全。"),
+    "AAGUID:": "AAGUID：",
+    "LibreFido 2 (standard build default)": "LibreFido 2（标准版固件默认值）",
+    "LibreFido 2 (HARDENED build default)": "LibreFido 2（HARDENED 版固件默认值）",
+    "LibreFido 2 enterprise (example)": "LibreFido 2 企业版（示例）",
+    "LibreFido 2 team (example)": "LibreFido 2 团队版（示例）",
 }
 
 
@@ -138,6 +152,29 @@ class SecurityTab(QWidget):
         self.apply_btn = QPushButton(T("Apply"))
         self.apply_btn.clicked.connect(self._apply_presence)
         fl.addWidget(self.apply_btn)
+
+        arow = QHBoxLayout()
+        arow.addWidget(QLabel(T("AAGUID:")))
+        self.aaguid_combo = QComboBox()
+        self.aaguid_combo.addItem(T("Firmware default"), "default")
+        for name, label, _ in policy.AAGUID_PRESETS:
+            self.aaguid_combo.addItem(T(label), name)
+        self.aaguid_combo.addItem(T("Custom..."), "custom")
+        self.aaguid_combo.currentIndexChanged.connect(self._aaguid_combo_changed)
+        arow.addWidget(self.aaguid_combo, 1)
+        self.aaguid_edit = QLineEdit()
+        self.aaguid_edit.setPlaceholderText("xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+        self.aaguid_edit.setMaxLength(48)       # UUID form, braces, spaces
+        self.aaguid_edit.setEnabled(False)
+        arow.addWidget(self.aaguid_edit, 1)
+        self.aaguid_set_btn = QPushButton(T("Set"))
+        self.aaguid_set_btn.clicked.connect(self._apply_aaguid)
+        arow.addWidget(self.aaguid_set_btn)
+        fl.addLayout(arow)
+        self.aaguid_current = QLabel("-")
+        self.aaguid_current.setTextFormat(Qt.TextFormat.PlainText)
+        self.aaguid_current.setWordWrap(True)
+        fl.addWidget(self.aaguid_current)
         lay.addWidget(prof)
 
         sec = QGroupBox(T("Secure profiles"))
@@ -189,8 +226,18 @@ class SecurityTab(QWidget):
         self.create_btn.setEnabled(bool(profiles) and not hardened)
         if "active" not in info or not profiles:
             self.apply_btn.setEnabled(False)
+            self.aaguid_combo.setEnabled(False)
+            self.aaguid_edit.setEnabled(False)
+            self.aaguid_set_btn.setEnabled(False)
             return
         p = profiles[info["active"]]
+        aaguid = p.get("aaguid")
+        known = "aaguid" in p and aaguid is not None
+        self.aaguid_current.setText("%s: %s" % (T("AAGUID"), policy.format_aaguid(aaguid)) if known
+                                    else "%s: -" % T("AAGUID"))
+        self.aaguid_combo.setEnabled(known)
+        self.aaguid_set_btn.setEnabled(known)
+        self.aaguid_edit.setEnabled(known and self.aaguid_combo.currentData() == "custom")
         secure = p.get("secure", False) or hardened
         self.kind.setText(T("Secure profile (keys never leave it)") if secure else T("Standard profile"))
         auto = set(p.get("auto_presence", []))
@@ -286,3 +333,31 @@ class SecurityTab(QWidget):
             return
         v = self.bright.value()
         self.w._run(lambda p: self.w.mgmt.set_led_brightness(v), touch=self.w._change_touch(), refresh=True)
+
+    def _aaguid_combo_changed(self, _index):
+        self.aaguid_edit.setEnabled(self.aaguid_combo.isEnabled() and self.aaguid_combo.currentData() == "custom")
+
+    def _apply_aaguid(self):
+        info = self.w.info
+        if not info or "active" not in info or not self.w._ready():
+            return
+        data = self.aaguid_combo.currentData()
+        if data == "default":
+            aaguid, shown = None, self.T("Firmware default")
+        elif data == "custom":
+            try:
+                aaguid = policy.parse_aaguid(self.aaguid_edit.text())
+            except ValueError:
+                QMessageBox.warning(self, self.T("Security"), self.T("aaguid-bad-hex"))
+                return
+            shown = policy.format_aaguid(aaguid)
+        else:
+            hex_value = next((h for name, _, h in policy.AAGUID_PRESETS if name == data), None)
+            aaguid = bytes.fromhex(hex_value) if hex_value else None
+            shown = policy.format_aaguid(hex_value) if hex_value else self.T("Firmware default")
+        if QMessageBox.question(
+                self, self.T("Security"), self.T("aaguid-confirm") % shown,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self.w._run(lambda p: self.w.mgmt.set_aaguid(aaguid), touch=True, refresh=True)

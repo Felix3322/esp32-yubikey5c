@@ -26,6 +26,15 @@
 extern int scan_files_fido();
 extern void init_otp();
 extern uint16_t fido_export_pin_check(const uint8_t *pin, uint16_t len);
+extern void fido_get_aaguid(uint8_t out[16]);
+extern int fido_aaguid_set(const uint8_t *in);
+
+#ifdef LF_STORE_V2
+static int mgmt_aaguid_get(uint8_t out[16]) {
+    fido_get_aaguid(out);
+    return PICOKEY_OK;
+}
+#endif
 
 #ifdef LF_STORE_V2
 /* PIN check of the management applet (export, import into the active slot,
@@ -63,6 +72,7 @@ int picokey_init() {
     ef_pin = search_by_fid(EF_PIN, NULL, SPECIFY_EF);
 #ifdef LF_STORE_V2
     lf_mgmt_set_pin_verifier(mgmt_pin_check);
+    lf_mgmt_set_aaguid_hooks(mgmt_aaguid_get, fido_aaguid_set);
 #endif
     if (!security_keystore_unlocked()) {
         printf("[librefido] key store locked: chip security state incomplete\n");

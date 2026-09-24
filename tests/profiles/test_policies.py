@@ -135,3 +135,63 @@ def test_led_brightness(pcscd, emulators):
     with pytest.raises(ApduError):
         m.set_led_brightness(300)
     m.close()
+
+
+def test_aaguid_custom(pcscd, emulators):
+    """A profile's AAGUID is its own file (build default until set), always
+    needs a touch, is reported for the mounted profile only, survives a
+    restart, travels with a clone, and reaches getInfo/attestation."""
+    e = emulators(env=MANUAL)
+    m = device(e)
+    idx = m.info()["active"]
+    default = m.info()["profiles"][idx]["aaguid"]
+    assert default == "08c228d97ea02bc8d08e0d22a6d13f7d"   # nothing set yet: the STANDARD build default
+
+    dev, c = ctap2()
+    try:
+        assert c.info.aaguid.hex() == "08c228d97ea02bc8d08e0d22a6d13f7d"     # STANDARD build default
+    finally:
+        dev.close()
+
+    custom = "11223344556677889900aabbccddeeff"[:32]
+    with pytest.raises(ApduError) as err:
+        m.set_aaguid(custom)                    # no touch: refused, nothing changed
+    assert err.value.sw == 0x6985
+    assert m.info()["profiles"][idx]["aaguid"] == default
+
+    touching(lambda: m.set_aaguid(custom))
+    assert m.info()["profiles"][idx]["aaguid"] == custom
+
+    dev, c = ctap2()
+    try:
+        assert c.info.aaguid.hex() == custom
+        cred = touching(lambda: c.make_credential(
+            os.urandom(32), {"id": "example.com", "name": "example.com"},
+            {"id": b"u", "name": "u", "displayName": "U"}, [{"type": "public-key", "alg": -7}],
+            options={"rk": True}))
+        assert cred.auth_data.credential_data.aaguid.hex() == custom
+    finally:
+        dev.close()
+
+    e.restart()                                  # the value is a flash file: it survives a restart
+    m.reconnect()
+    assert m.info()["profiles"][idx]["aaguid"] == custom
+
+    with pytest.raises(ValueError):
+        m.set_aaguid("too short")
+
+    touching(lambda: m.set_aaguid(None))          # back to the build default
+    assert m.info()["profiles"][idx]["aaguid"] == default
+    m.close()
+
+
+def test_aaguid_not_reported_for_unmounted_profile(pcscd, emulators):
+    """A slot that is not mounted cannot report its AAGUID (its own file is
+    only reachable while its store is mounted): the tool sees this as
+    'unknown', not 'using the default'."""
+    e = emulators()
+    m = device(e)
+    profiles = m.info()["profiles"]
+    other = next(i for i in range(len(profiles)) if i != m.info()["active"])
+    assert profiles[other]["aaguid"] is None
+    m.close()

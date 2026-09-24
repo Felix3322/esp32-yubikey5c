@@ -14,7 +14,7 @@ CLA = 0x80
 INS_INFO, INS_HEALTH = 0x01, 0x02
 INS_PROFILE_SELECT, INS_PROFILE_SET, INS_PROFILE_WIPE, INS_PROFILE_DELETE, INS_BUTTON_SLOTS = \
     0x10, 0x11, 0x12, 0x13, 0x14
-INS_PROFILE_CREATE_SECURE, INS_BOARD_SET = 0x15, 0x16
+INS_PROFILE_CREATE_SECURE, INS_BOARD_SET, INS_PROFILE_AAGUID_SET = 0x15, 0x16, 0x17
 INS_EXPORT_BEGIN, INS_EXPORT_READ, INS_EXPORT_END = 0x20, 0x21, 0x22
 INS_IMPORT_BEGIN, INS_IMPORT_WRITE, INS_IMPORT_END = 0x28, 0x29, 0x2A
 INS_FACTORY_RESET, INS_REBOOT = 0x30, 0x3F
@@ -265,6 +265,13 @@ class Management:
                     # protocol 3: automatic presence per application, secure profile
                     "auto_presence": policy.apps_of(p.get(7, 0)),
                     "secure": bool(p.get(8, False)),
+                    # firmware 2.1.0+: AAGUID of the mounted profile only (its own
+                    # file, unreadable for a slot that is not mounted -- reported
+                    # as an empty byte string there, same as on older firmware
+                    # that has no key 9 at all): the 32-hex-digit value actually
+                    # in force (the build default when the profile never set its
+                    # own), or None when it cannot be read.
+                    "aaguid": (p[9].hex() or None) if 9 in p else None,
                 } for p in m[15]],
             })
         if 17 in m:
@@ -437,6 +444,21 @@ class Management:
         """LED brightness 0..255 (device wide, applied at once; a touch once
         the free changes are used up)."""
         self._cmd(INS_BOARD_SET, data=cbor.encode({1: value}), what="LED brightness")
+
+    def set_aaguid(self, aaguid=None):
+        """AAGUID the mounted profile reports in getInfo and attestation from
+        now on: 16 raw bytes, a 32-hex-digit string, or None to go back to
+        the firmware's own default. Never a real vendor's AAGUID (this tool
+        does not check for one; that is a policy decision for whoever calls
+        it -- see docs/COMPATIBILITY.md). Always a touch. Refused (6d00)
+        on firmware without the command."""
+        m = {}
+        if aaguid is not None:
+            raw = policy.parse_aaguid(aaguid) if isinstance(aaguid, str) else bytes(aaguid)
+            if len(raw) != 16:
+                raise ValueError("an AAGUID is 16 bytes (32 hex digits)")
+            m[1] = raw
+        self._cmd(INS_PROFILE_AAGUID_SET, data=cbor.encode(m), what="AAGUID")
 
     def wipe_profile(self, idx):
         """Empties profile idx, or creates one in an empty slot (touch); the
