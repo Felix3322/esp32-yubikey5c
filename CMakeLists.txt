@@ -86,6 +86,7 @@ endif()
 
 list(APPEND SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/src/fido2/files.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/fido2/librefido_init.c
     ${CMAKE_CURRENT_LIST_DIR}/pico-fido/src/fido/fido.c
     ${CMAKE_CURRENT_LIST_DIR}/pico-fido/src/fido/kek.c
     ${CMAKE_CURRENT_LIST_DIR}/pico-fido/src/fido/cmd_register.c
@@ -184,7 +185,9 @@ if(NOT ESP_PLATFORM)
                 -Wl,--gc-sections
             )
         endif()
-        target_link_libraries(pico_fido2 PRIVATE pthread m)
+        # The SDK sources are compiled into the executable directly; only the
+        # third-party static libraries created by pico_keys_sdk_import need linking.
+        target_link_libraries(pico_fido2 PRIVATE mbedtls tinycbor pthread m)
     else()
         target_link_libraries(pico_fido2 PRIVATE pico_keys_sdk pico_stdlib pico_multicore hardware_flash hardware_sync hardware_adc pico_unique_id pico_aon_timer tinyusb_device tinyusb_board)
         pico_add_extra_outputs(${CMAKE_PROJECT_NAME})
