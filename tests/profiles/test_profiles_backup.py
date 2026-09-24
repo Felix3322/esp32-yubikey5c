@@ -124,6 +124,12 @@ def test_fresh_device(pcscd, emulators):
     assert info["profiles"][0]["used"] and not any(p["used"] for p in info["profiles"][1:])
     assert info["serial"] == info["chip_serial"]        # profile 1 presents the chip serial
     assert info["security"]["root_key"].startswith("flash")
+    dev, c = ctap2()
+    try:
+        # LibreFido's own model identifier, never another vendor's
+        assert bytes(c.info.aaguid).hex() == "08c228d97ea02bc8d08e0d22a6d13f7d"
+    finally:
+        dev.close()
     m.close()
 
 
@@ -164,6 +170,7 @@ def test_long_press_switches_profile(pcscd, emulators):
     wait_reboot(m)
     info = m.info()
     assert info["active"] == 1 and info["profiles"][1]["used"]
+    assert info["last_result"] == "created"
     b = Button()
     b.press(0.8)                                        # and back (2 button slots)
     b.close()
