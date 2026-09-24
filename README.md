@@ -1,190 +1,128 @@
-# Pico FIDO2
+# LibreFido 2
 
-This project transforms your Raspberry RP235x or ESP32 microcontroller into an integrated FIDO Passkey **and** OpenPGP smartcard, functioning like a standard USB Passkey for authentication and as a smartcard for cryptographic operations.
+> **安全性和便利性不可兼得，本项目只专注于便利性，请勿存档任何有价值的数据。**
+>
+> *Security and convenience cannot both be had. This project focuses on
+> convenience only: do not keep anything valuable on it.*
+>
+> LibreFido keys can be backed up, exported and cloned, run on a general
+> purpose microcontroller and are not certified by anyone. That is the point
+> of the project, and it is also why a LibreFido key is **not** a substitute
+> for a secure element or a certified authenticator. Use it where losing or
+> leaking a key is an inconvenience, not a disaster.
 
-This is a fork of the last community edition version of the pico-fido2 firmware, from December 9th 2025, that was available on https://github.com/polhenarejos/pico-fido2 before that repository was deleted and replaced by something else.
+LibreFido turns an **ESP32-S3** (primary target: N16R8, 16 MB flash, 8 MB
+PSRAM) into a USB security key with several independent applications:
 
----
+| Application | What it does | Details |
+|---|---|---|
+| FIDO2 / WebAuthn, U2F | passkeys, second factor, CTAP 2.1 | [docs/FIDO2.md](docs/FIDO2.md) |
+| OpenPGP card 3.4 | GnuPG signing, decryption, SSH | [docs/OPENPGP.md](docs/OPENPGP.md) |
+| PIV | smart card logon, S/MIME, SSH (PKCS#11) | [docs/PIV.md](docs/PIV.md) |
+| OATH | TOTP / HOTP codes (YKOATH protocol) | [docs/OATH_OTP.md](docs/OATH_OTP.md) |
+| OTP | slots typed by the button (keyboard) | [docs/OATH_OTP.md](docs/OATH_OTP.md) |
 
-## Supported platforms
+What makes it *LibreFido 2*:
 
-| | RP2040 | RP2350 | ESP32-S2 | ESP32-S3 |
-|---|---|---|---|---|
-| CPU | 2x Cortex-M0+ | 2x Cortex-M33 | 1x Xtensa | 2x Xtensa |
-| Core pinning | Yes  | Yes | No  | Yes |
-| RTOS | No (Pico SDK) | No (Pico SDK) | FreeRTOS | FreeRTOS |
-| MCU ID | `0` | `1` | `2` | `2` |
+- **Several keys in one device.** Up to four *profiles*, each a complete,
+  isolated authenticator (own root key, serial, PINs, credentials, counters,
+  OpenPGP/PIV/OATH data). Hold the button for 5 s to switch; the LED colour
+  shows the active profile. After a switch the host sees another key.
+- **Backups, clones and restore tests.** Export a profile to a versioned,
+  optionally passphrase-encrypted file, verify a backup without importing it
+  (offline, on the device, or with a full restore test), import it into any
+  slot of any LibreFido device.
+- **Storage that survives power cuts and ageing flash.** Journaled
+  transactions, two copies of every sector, Reed-Solomon parity, generation
+  counters and a scrub at every boot ([docs/SECURITY_ARCHITECTURE.md](docs/SECURITY_ARCHITECTURE.md)).
+- **Firmware updates with rollback.** A/B slots: a new firmware that is not
+  confirmed after the restart is rolled back; key storage is never touched by
+  an update.
+- **Desktop tools.** `librefido` (command line) and `librefido-gui`
+  (PySide6, English/Chinese) over PC/SC, no administrator rights needed
+  ([tools/librefido](tools/librefido/README.md)).
 
-### Security
+LibreFido is a fork of the community edition of pico-fido2 (December 2025).
+It is **not** affiliated with Yubico, Nitrokey or anyone else, uses its own
+AAGUID, its own USB identity and self attestation, and never presents itself
+as another vendor's product.
 
-Currently most secure features are supported and implemented only for RP2350.
+## Quick start (ESP32-S3)
 
-| | RP2350 | RP2040 | ESP32-S2 | ESP32-S3 |
-|---|---|---|---|---|
-| Secure Boot | Full (boot key hash, CRIT1 flags, debug disable, glitch detector) | No HW support | No (`// TODO`) | No (`// TODO`) |
-| Secure Lock | Yes (key invalidation, page locking) | No | No | No |
-| MKEK in OTP/eFuse | Yes (OTP rows with ECC, chaff, page locking) | No (plaintext flash) | Yes (eFuse `BLK_KEY3`, write-locked) | Yes (eFuse `BLK_KEY3`, write-locked) |
-| Device key in OTP/eFuse | Yes (OTP + chaff + migration) | No | Yes (eFuse `BLK_KEY4`) | Yes (eFuse `BLK_KEY4`) |
-| `cmd_secure` APDU | Available | Not available | Available | Available |
-| Firmware signing | Yes (`pico_sign_binary`) | No | No | No |
-| Rollback protection | Yes | No | No | No |
-| HW crypto | SHA-256	| No | SHA-256 + AES-GCM + ECDSA/ECDH | SHA-256 + AES-GCM + ECDSA/ECDH |
-
-## Features
-
-Pico FIDO2 includes the following features:
-
-### FIDO2 / U2F / WebAuthn
-
-- CTAP 2.1 / CTAP 1
-- WebAuthn
-- U2F
-- HMAC-Secret extension
-- CredProtect extension
-- User presence enforcement through physical button
-- User verification with PIN
-- Discoverable credentials (resident keys)
-- Credential management
-- ECDSA and EDDSA authentication
-- Support for SECP256R1, SECP384R1, SECP521R1, SECP256K1 and Ed25519 curves
-- App registration and login
-- Device selection
-- Support for vendor configuration
-- Backup with 24 words
-- Secure lock to protect the device from flash dumps
-- Permissions support (MC, GA, CM, ACFG, LBW)
-- Authenticator configuration
-- minPinLength extension
-- Self attestation
-- Enterprise attestation
-- credBlobs extension
-- largeBlobKey extension
-- Large blobs support (2048 bytes max)
-- OATH (based on YKOATH protocol specification)
-- TOTP / HOTP
-- Yubikey One Time Password
-- Challenge-response generation
-- Emulated keyboard interface
-- Button press generates an OTP that is directly typed
-- Yubico YKMAN compatible
-- Nitrokey nitropy and nitroapp compatible
-- Secure Boot and Secure Lock in RP2350 and ESP32-S3 MCUs
-- One Time Programming to store the master key that encrypts all resident keys and seeds.
-- Rescue interface to allow recovery of the device if it becomes unresponsive or undetectable.
-- LED customization with Pico Commissioner.
-
-### OpenPGP Smartcard
-
-- OpenPGP card specification v3.4
-- 3 key slots (Signature, Encryption, Authentication)
-- RSA (2048, 3072, 4096), Ed25519, Curve25519, ECDSA (NIST P-256, P-384, P-521)
-- Key generation on device
-- Key import/export
-- PIN and Admin PIN protection
-- Reset and Unblock functions
-- Works with GnuPG, SSH, S/MIME, and compatible tools
-- CCID over USB
-- Compatible with major OS (Linux, Windows, macOS)
-- Touch button for user presence confirmation (optional)
-- Open source
-
----
-
-## Security Considerations
-
-Microcontrollers RP2350 and ESP32-S3 are designed to support secure environments when Secure Boot is enabled, and optionally, Secure Lock. These features allow a master key encryption key (MKEK) to be stored in a one-time programmable (OTP) memory region, which is inaccessible from outside secure code. This master key is then used to encrypt all private and secret keys on the device, protecting sensitive data from potential flash memory dumps.
-
-**However**, the RP2040 microcontroller lacks this level of security hardware, meaning that it cannot provide the same protection. Data stored on its flash memory, including private or master keys, can be easily accessed or dumped, as encryption of the master key itself is not feasible. Consequently, if an RP2040 device is stolen, any stored private or secret keys may be exposed.
-
----
-
-## Build for Raspberry Pico
-
-Before building, ensure you have installed the toolchain for the Pico and that the Pico SDK is properly located on your drive.
-
-```
-git clone https://github.com/youruser/pico-fido2
-git submodule update --init --recursive
-cd pico-fido2
-mkdir build
-cd build
-PICO_SDK_PATH=/path/to/pico-sdk cmake .. -DPICO_BOARD=board_type -DUSB_VID=0x1D50 -DUSB_PID=0x619B
-make
-```
-
-Note that `PICO_BOARD`, `USB_VID` and `USB_PID` are optional. If not provided, `pico` board and VID/PID `1D50:619B` will be used.
-
-Additionally, you can pass the `VIDPID=value` parameter to build the firmware with a known VID/PID. The supported values are:
-
-- `NitroHSM`
-- `NitroFIDO2`
-- `NitroStart`
-- `NitroPro`
-- `Nitro3`
-- `Yubikey5`
-- `YubikeyNeo`
-- `YubiHSM`
-- `Gnuk`
-- `GnuPG`
-
-You can use whatever VID/PID for your own personal use. **But remember that you are not authorized to distribute the binary with a VID/PID that you do not own.**
-The VID/PID `1D50:619B` is provided to the project by [OpenMoko](https://wiki.openmoko.org/wiki/USB_Product_IDs). It can only be used for builds distributed under a free and open source license.
-
-After running `make`, the binary file `pico_fido2.uf2` will be generated. To load this onto your Pico board:
-
-1. Put the Pico board into loading mode by holding the `BOOTSEL` button while plugging it in.
-2. Copy the `pico_fido2.uf2` file to the new USB mass storage device that appears.
-3. Once the file is copied, the Pico mass storage device will automatically disconnect, and the Pico board will reset with the new firmware.
-4. A blinking LED will indicate that the device is ready to work.
-
-To configure your device you can use the [picoforge desktop application ](https://github.com/librekeys/picoforge).
-
-## Build for ESP32
-
-Replace
-- `ESP_PRODUCT` with your SoC's name: e.g. `esp32s2` or `esp32s3`
-- `ESP_NAME` with it's full name: `ESP32-S2` or `ESP32-S3`
-
-Install ESP-IDF and toolchain
+Build (ESP-IDF 5.5):
 
 ```bash
-git clone --recursive https://github.com/espressif/esp-idf.git -b v5.5 --depth=1
-cd esp-idf
-./install.sh ESP_PRODUCT
-. ./export.sh
-cd ..
+git clone --recursive <this repository> librefido && cd librefido
+idf.py set-target esp32s3
+idf.py build
 ```
 
-Then, you can build with:
+Flash (first time; the board's USB port, hold BOOT while plugging in if the
+board does not enter the loader by itself):
+
 ```bash
-idf.py set-target ESP_PRODUCT
-idf.py all
-cd build
-esptool.py --chip ESP_NAME merge_bin -o pico_fido_esp32.bin @flash_args
+esptool --chip esp32s3 -p COM6 write-flash @build/flash_args
 ```
 
-The binary file `pico_fido_esp32.bin` will be generated. To load this onto your board:
+Later updates go through the key itself (A/B, with rollback):
 
-1. Put the board into loading mode by holding the `BOOT` button while plugging it in.
-2. For Windows users, install drivers with [this guide](https://github.com/espressif/esp-win-usb-drivers#documentation)
-3. Go to https://espressif.github.io/esptool-js/
-4. Click on Connect and choose the board
-5. Choose the `pico_fido_esp32.bin` file
-6. Set Flash Address=0x0000
-7. Click Program
-8. Press RST/Reset button on the board. A blinking LED will indicate that the device is ready to work.
+```bash
+librefido firmware update build/pico_fido2.bin
+```
 
-To configure your device you can use the [picoforge desktop application ](https://github.com/librekeys/picoforge).
+Install the tools and look at the device:
 
+```bash
+pip install "./tools/librefido[gui]"
+librefido info
+librefido-gui
+```
 
-## Drivers
+Flashing never burns eFuses. Chip security (binding the root key to the
+chip, Secure Boot, flash encryption) is a separate, explicit and partly
+irreversible step: read [docs/PROVISIONING.md](docs/PROVISIONING.md) and
+[docs/ESP32S3_HARDENING.md](docs/ESP32S3_HARDENING.md) first.
 
-Pico FIDO2 uses the `HID` driver for FIDO and `CCID` for OpenPGP, both present in all major operating systems. It should be detected by all OS and browser/applications just like normal USB FIDO keys and smartcards.
+## Build profiles
+
+| | DEVELOPMENT | STANDARD (default) | HARDENED |
+|---|---|---|---|
+| Profiles, backups, clones | yes | yes | no export (keys never leave) |
+| APDU tracing | on request | on request | refused at build time |
+| Maintenance writes (rescue applet) | touch | touch | refused |
+| Firmware updates | touch (+ FIDO PIN) | touch (+ FIDO PIN) | only with Secure Boot, no downgrade |
+| Key store unlocked | always | always | only with the full chip security state |
+| AAGUID | LibreFido 2 | LibreFido 2 | LibreFido 2 hardened |
+
+Select with `-DLIBREFIDO_PROFILE_DEVELOPMENT=1` or
+`-DLIBREFIDO_PROFILE_HARDENED=1` (compile definitions).
+
+## Documentation
+
+- [docs/SECURITY_ARCHITECTURE.md](docs/SECURITY_ARCHITECTURE.md) — keys, storage, profiles, backups, updates, threat model
+- [docs/ESP32S3_HARDENING.md](docs/ESP32S3_HARDENING.md) — eFuses, Secure Boot, flash encryption, brick-risk boundaries
+- [docs/PROVISIONING.md](docs/PROVISIONING.md) — the provisioning tool and its rules
+- [docs/FIDO2.md](docs/FIDO2.md), [docs/OPENPGP.md](docs/OPENPGP.md), [docs/PIV.md](docs/PIV.md), [docs/OATH_OTP.md](docs/OATH_OTP.md)
+- [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) — what works with which client, and what does not
+- [docs/TESTING.md](docs/TESTING.md) — emulator, test suites, hardware tests
+
+## Other platforms
+
+The RP2040/RP2350 builds of the original project still compile (Pico SDK,
+`PICO_SDK_PATH=... cmake .. -DPICO_BOARD=...`) but use the single-profile
+legacy store: profiles, backups, firmware updates and the resilient storage
+are ESP32-S3 (and emulator) features.
+
+## USB identity
+
+The default VID/PID `1D50:619B` was given to the original project by
+[OpenMoko](https://wiki.openmoko.org/wiki/USB_Product_IDs) and may only be
+used for builds distributed under a free license. Builds with another
+vendor's identity (`-DVIDPID=...`) are for personal experiments only and must
+not be distributed; Yubico's identity is refused by the build and by the
+firmware.
 
 ## License
 
-This project is released under the GNU Affero General Public License v3 (AGPLv3).
-A copy of the AGPLv3 license is available in the `LICENSE` file.
-
-## Credits
-This project uses libraries and portion of code from other projects that are detailed in the `LICENSE` file.
+GNU Affero General Public License v3 (AGPLv3), see `LICENSE`, which also
+lists the third-party code this project uses.
