@@ -79,10 +79,18 @@ class Emulator:
     device; wipe() starts from an empty store.
     """
 
-    def __init__(self, binary=None, workdir=None, env=None):
+    def __init__(self, binary=None, workdir=None, env=None, chip_id=None):
         self.binary = binary or os.environ.get("LF_EMU_BIN") or os.path.join(REPO_ROOT, "build-emu", "pico_fido2")
         self.workdir = workdir or tempfile.mkdtemp(prefix="lf-emu-")
         os.makedirs(self.workdir, exist_ok=True)
+        # Every emulated device gets its own silicon ID (kept across restarts).
+        chip = os.path.join(self.workdir, "memory.efuse.chipid")
+        if chip_id is not None:
+            with open(chip, "wb") as f:
+                f.write(chip_id)
+        elif not os.path.exists(chip):
+            with open(chip, "wb") as f:
+                f.write(os.urandom(8))
         self.extra_env = dict(env or {})
         self.proc = None
         self.log_path = os.path.join(self.workdir, "emulator.log")
