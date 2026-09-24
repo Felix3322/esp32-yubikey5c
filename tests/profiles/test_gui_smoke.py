@@ -93,7 +93,7 @@ def test_gui_manages_the_device(pcscd, app, tmp_path, monkeypatch):
         monkeypatch.setattr(QtWidgets.QMessageBox, "question",
                             staticmethod(lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Yes))
         w._update_firmware()
-        wait_idle(app, w)
+        wait_idle(app, w, timeout=240)                  # the image is the emulator itself (large with ASan)
         assert w.info["firmware"] == "2.0.7", app.messages
         assert not w.info["firmware_slot"]["unconfirmed"]
         assert "2.0.7" in w.fw_state.text()
