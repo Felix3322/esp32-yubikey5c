@@ -17,9 +17,13 @@
 #include "pico_keys.h"
 #include "security.h"
 #include <stdio.h>
+#ifdef LF_STORE_V2
+#include "lf_mgmt.h"
+#endif
 
 extern int scan_files_fido();
 extern void init_otp();
+extern uint16_t fido_export_pin_check(const uint8_t *pin, uint16_t len);
 
 /* Runs once at boot, after the store, the device root and USB are up.
  * Key material is only created or loaded when the key store is unlocked;
@@ -32,6 +36,10 @@ int picokey_init() {
     scan_files_fido();
 #ifdef ENABLE_OTP_APP
     init_otp();
+#endif
+#ifdef LF_STORE_V2
+    /* Exporting a profile asks for its FIDO PIN when one is set. */
+    lf_mgmt_set_pin_verifier(fido_export_pin_check);
 #endif
     return PICOKEY_OK;
 }
