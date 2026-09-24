@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "librefido-tools"
+version = "2.0.0"
+description = "Management, backup and GUI tools for LibreFido security keys"
+readme = "README.md"
+license = { text = "AGPL-3.0-only" }
+requires-python = ">=3.9"
+dependencies = [
+    "pyscard>=2.0",
+    "fido2>=1.1",
+    "cryptography>=41",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.5"]
+recovery = ["esptool>=4.7"]
+
+[project.scripts]
+librefido = "librefido.cli:main"
+
+[project.gui-scripts]
+librefido-gui = "librefido.gui:main"
+
+[tool.setuptools]
+packages = ["librefido"]
