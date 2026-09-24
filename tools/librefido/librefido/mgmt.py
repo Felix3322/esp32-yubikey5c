@@ -17,6 +17,7 @@ INS_EXPORT_BEGIN, INS_EXPORT_READ, INS_EXPORT_END = 0x20, 0x21, 0x22
 INS_IMPORT_BEGIN, INS_IMPORT_WRITE, INS_IMPORT_END = 0x28, 0x29, 0x2A
 INS_FACTORY_RESET, INS_REBOOT = 0x30, 0x3F
 INS_FW_BEGIN, INS_FW_WRITE, INS_FW_END, INS_FW_CONFIRM, INS_FW_ROLLBACK = 0x40, 0x41, 0x42, 0x43, 0x44
+INS_PROVISION_HMAC = 0x50
 
 PROFILE_F_NO_EXPORT = 0x01
 BOOT_STATUS = ["ok", "partition table too old", "system area unreadable",
@@ -229,6 +230,12 @@ class Management:
         self._cmd(INS_FW_ROLLBACK, what="firmware rollback")
         self.reconnect(timeout)
         return self.info()["firmware"]
+
+    def provision_hmac(self):
+        """Irreversible: burns an HMAC key generated on the device into an
+        eFuse key block and binds the root key to it (touch). Use
+        librefido.provision.bind_root_key(), which checks and verifies."""
+        self._cmd(INS_PROVISION_HMAC, 0xA5, 0x01, what="bind root key to the chip")
 
     def factory_reset(self, legacy=False):
         self._cmd(INS_FACTORY_RESET, 0x5A, 1 if legacy else 0, what="factory reset")

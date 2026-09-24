@@ -181,6 +181,47 @@ def cmd_firmware(args):
     with_session(args, run)
 
 
+def cmd_provision(args):
+    from . import provision
+
+    def run(m):
+        info = m.info()
+        if args.action == "plan":
+            steps = provision.plan(info)
+            if args.json:
+                _print([{k: s[k] for k in ("id", "title", "is_done", "automated", "irreversible", "effect",
+                                           "brick_risk")} for s in steps], True)
+                return
+            print("device %s, %s build, %s" % (info["chip_serial"], info["build_profile"],
+                                                 info.get("firmware_slot", {}).get("platform", "?")))
+            for i, s in enumerate(steps, 1):
+                print("\n%d. [%s] %s%s" % (i, "done" if s["is_done"] else "todo", s["title"],
+                                           "" if s["automated"] else "  (manual, see docs/ESP32S3_HARDENING.md)"))
+                if not s["is_done"]:
+                    print("   irreversible: %s\n   effect: %s\n   brick risk: %s" % (
+                        s["irreversible"], s["effect"], s["brick_risk"]))
+            return
+        # action == "bind-root-key"
+        steps = {s["id"]: s for s in provision.plan(info)}
+        s = steps["hmac"]
+        print("%s\n  irreversible: %s\n  effect: %s\n  brick risk: %s" % (
+            s["title"], s["irreversible"], s["effect"], s["brick_risk"]))
+        if not args.apply:
+            provision.check_consistent(info)
+            print("\ndry run: nothing changed (add --apply to do it)")
+            return
+
+        def confirm(expected):
+            return input("Type '%s' to burn the eFuse key: " % expected).strip()
+        _touch_hint()
+        after = provision.bind_root_key(m, confirm, directory=args.metadata_dir)
+        print("root key: %s" % after["security"]["root_key"])
+    try:
+        with_session(args, run)
+    except provision.ProvisionError as e:
+        sys.exit("refused: %s" % e)
+
+
 def cmd_reboot(args):
     with_session(args, lambda m: m.reboot(bootloader=args.bootloader))
 
@@ -252,6 +293,11 @@ def main(argv=None):
     fw.add_argument("--pin", action="store_true", help="ask for the FIDO PIN of the active profile")
     fw.add_argument("-y", "--yes", action="store_true")
     fw.set_defaults(fn=cmd_firmware)
+    pv = sub.add_parser("provision", help="chip security: plan (read only) or bind the root key to the chip")
+    pv.add_argument("action", choices=["plan", "bind-root-key"])
+    pv.add_argument("--apply", action="store_true", help="really burn the eFuse key (default: dry run)")
+    pv.add_argument("--metadata-dir", default=".", help="where the device metadata is saved first")
+    pv.set_defaults(fn=cmd_provision)
     rb = sub.add_parser("reboot")
     rb.add_argument("--bootloader", action="store_true", help="ESP32 ROM download mode (recovery flash)")
     rb.set_defaults(fn=cmd_reboot)
