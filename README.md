@@ -5,15 +5,19 @@
 > irreversible eFuse step, one click in the GUI) and a flash dump no longer
 > reveals any key; add Secure Boot and flash encryption and only physical
 > attacks on the chip remain. A *secure profile* keeps its keys on the device
-> for good, like a YubiKey; a standard profile can be backed up and cloned.
+> for good, like a YubiKey; a standard profile can be backed up and cloned,
+> and single keys can be copied out of it (touch and FIDO PIN).
 > The ESP32-S3 is a general purpose microcontroller, not a secure element,
 > and LibreFido is not FIDO certified. What each protection level resists:
 > [docs/SECURITY_MODES.md](docs/SECURITY_MODES.md).
 >
 > 密钥在 flash 中始终加密并带认证存储。把根密钥绑定到芯片后，读出 flash
 > 也得不到密钥；再启用 Secure Boot 和 flash 加密后只剩针对芯片的物理攻击。
-> "安全环境"中的密钥永不离开设备。ESP32-S3 不是安全芯片（Secure Element），
-> 本项目也未经 FIDO 认证，各防护等级的边界见上面的文档。
+> "安全环境"中的密钥永不离开设备。普通环境可以备份、克隆，也可以单独导出或
+> 导入一个密钥（通行密钥、OATH 账户、OTP 槽位、OpenPGP 或 PIV 密钥；导出需要
+> 按键和 FIDO PIN，见 [docs/KEY_TRANSFER.md](docs/KEY_TRANSFER.md)）。
+> ESP32-S3 不是安全芯片（Secure Element），本项目也未经 FIDO 认证，各防护等级
+> 的边界见上面的文档。
 
 LibreFido turns an **ESP32-S3** (primary target: N16R8, 16 MB flash, 8 MB
 PSRAM) into a USB security key with several independent applications:
@@ -36,6 +40,13 @@ What makes it *LibreFido 2*:
   optionally passphrase-encrypted file, verify a backup without importing it
   (offline, on the device, or with a full restore test), import it into any
   slot of any LibreFido device.
+- **Single keys, in and out.** Copy one passkey, OATH account, OTP slot,
+  OpenPGP key or PIV key (with its certificate) into an encrypted key file
+  and add it to another device (a touch, and the FIDO PIN when the profile
+  has one; never out of a secure profile or a HARDENED build). Keys also
+  come in from standard formats: `otpauth://` links and QR codes (Google
+  Authenticator exports too), PEM / DER / PKCS#12 and OpenPGP secret key
+  files ([docs/KEY_TRANSFER.md](docs/KEY_TRANSFER.md)).
 - **Storage that survives power cuts and ageing flash.** Journaled
   transactions, two copies of every sector, Reed-Solomon parity, generation
   counters and a scrub at every boot ([docs/SECURITY_ARCHITECTURE.md](docs/SECURITY_ARCHITECTURE.md)).
@@ -102,6 +113,7 @@ irreversible step: read [docs/PROVISIONING.md](docs/PROVISIONING.md) and
 | | DEVELOPMENT | STANDARD (default) | HARDENED |
 |---|---|---|---|
 | Profiles, backups, clones | yes | yes | no export (keys never leave) |
+| Single-key export / FIDO import | yes | yes | no (OTP, OATH, OpenPGP, PIV keys can be added) |
 | APDU tracing | on request | on request | refused at build time |
 | Maintenance writes (rescue applet) | touch | touch | refused |
 | Firmware updates | touch (+ FIDO PIN) | touch (+ FIDO PIN) | only with Secure Boot, no downgrade |
@@ -119,6 +131,7 @@ GPIO and the eFuse block for the root key binding.
 - [docs/SECURITY_ARCHITECTURE.md](docs/SECURITY_ARCHITECTURE.md) — keys, storage, profiles, backups, updates, threat model
 - [docs/ESP32S3_HARDENING.md](docs/ESP32S3_HARDENING.md) — eFuses, Secure Boot, flash encryption, brick-risk boundaries
 - [docs/PROVISIONING.md](docs/PROVISIONING.md) — the provisioning tool and its rules
+- [docs/KEY_TRANSFER.md](docs/KEY_TRANSFER.md) — exporting and importing single keys (2.1.0)
 - [docs/FIDO2.md](docs/FIDO2.md), [docs/OPENPGP.md](docs/OPENPGP.md), [docs/PIV.md](docs/PIV.md), [docs/OATH_OTP.md](docs/OATH_OTP.md)
 - [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) — what works with which client, and what does not
 - [docs/TESTING.md](docs/TESTING.md) — emulator, test suites, hardware tests

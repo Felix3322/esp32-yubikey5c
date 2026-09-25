@@ -21,6 +21,7 @@
 #include "fido/files.h"
 #ifdef LF_STORE_V2
 #include "lf_mgmt.h"
+#include "lf_keyio.h"
 #endif
 
 extern int scan_files_fido();
@@ -73,13 +74,23 @@ int picokey_init() {
 #ifdef LF_STORE_V2
     lf_mgmt_set_pin_verifier(mgmt_pin_check);
     lf_mgmt_set_aaguid_hooks(mgmt_aaguid_get, fido_aaguid_set);
+    /* Single-key transfer (lf_keyio.h). The management applet refuses it
+     * while the key store is locked, so the hooks may be known either way. */
+    lf_keyio_fido_register();
+#if defined(ENABLE_OATH_APP) && ENABLE_OATH_APP
+    lf_keyio_oath_register();
+#endif
+#if defined(ENABLE_OTP_APP) && ENABLE_OTP_APP
+    lf_keyio_otp_register();
+#endif
+    lf_keyio_openpgp_piv_register();
 #endif
     if (!security_keystore_unlocked()) {
         printf("[librefido] key store locked: chip security state incomplete\n");
         return PICOKEY_ERR_BLOCKED;
     }
     scan_files_fido();
-#ifdef ENABLE_OTP_APP
+#if defined(ENABLE_OTP_APP) && ENABLE_OTP_APP      /* CMake defines it 0 when off */
     init_otp();
 #endif
     return PICOKEY_OK;

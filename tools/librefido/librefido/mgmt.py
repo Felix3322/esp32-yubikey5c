@@ -21,6 +21,14 @@ INS_FACTORY_RESET, INS_REBOOT = 0x30, 0x3F
 INS_FW_BEGIN, INS_FW_WRITE, INS_FW_END, INS_FW_CONFIRM, INS_FW_ROLLBACK = 0x40, 0x41, 0x42, 0x43, 0x44
 INS_PROVISION_HMAC = INS_PROVISION = 0x50
 PROVISION_BIND, PROVISION_LOCK_DEBUG = 0x01, 0x02     # P2 of PROVISION (P1 0xA5)
+INS_KEY_LIST, INS_KEY_EXPORT, INS_KEY_IMPORT = 0x60, 0x61, 0x62
+
+# Single-key transfer (docs/KEY_TRANSFER.md): application numbers (lf_app_t)
+# are the indexes of these names.
+APPS = policy.APPS
+KEY_ID_MAX = 64             # LF_KEYIO_ID_MAX
+KEY_LIST_PAGES = 1024       # a listing that takes more pages than this is broken
+LIST_SESSION_ID_LEN = 8     # KEY_LIST key 4
 
 # The FIDO application on the same PC/SC interface (CTAP over ISO 7816).
 FIDO_AID = bytes.fromhex("A0000006472F0001")
@@ -92,6 +100,8 @@ def _load(d, pos, depth):
             raise ValueError("truncated")
         arg = int.from_bytes(d[pos:pos + n], "big")
         pos += n
+    elif ai == 31 and mt in (4, 5):
+        arg = None          # indefinite length (KEY_LIST pages): items up to the break byte FF
     else:
         raise ValueError("indefinite length or reserved item")
     if mt == 0:
@@ -103,19 +113,16 @@ def _load(d, pos, depth):
             raise ValueError("truncated")
         v = d[pos:pos + arg]
         return (v if mt == 2 else v.decode("utf-8", "replace")), pos + arg
-    if mt == 4:
-        items = []
-        for _ in range(arg):
-            v, pos = _load(d, pos, depth + 1)
-            items.append(v)
-        return items, pos
-    if mt == 5:
-        m = {}
-        for _ in range(arg):
+    if mt in (4, 5):
+        items, n = [], 0
+        while (n < arg) if arg is not None else (d[pos] != 0xFF):
             k, pos = _load(d, pos, depth + 1)
-            v, pos = _load(d, pos, depth + 1)
-            m[k] = v
-        return m, pos
+            if mt == 5:
+                v, pos = _load(d, pos, depth + 1)
+                k = (k, v)
+            items.append(k)
+            n += 1
+        return (items if mt == 4 else dict(items)), pos + (arg is None)
     if mt == 7 and ai in (20, 21, 22):
         return (False, True, None)[ai - 20], pos
     raise ValueError("unsupported item %02X" % fb)
@@ -451,7 +458,7 @@ class Management:
         the firmware's own default. Never a real vendor's AAGUID (this tool
         does not check for one; that is a policy decision for whoever calls
         it -- see docs/COMPATIBILITY.md). Always a touch. Refused (6d00)
-        on firmware without the command."""
+        on firmware without the hook (no FIDO applet in this build)."""
         m = {}
         if aaguid is not None:
             raw = policy.parse_aaguid(aaguid) if isinstance(aaguid, str) else bytes(aaguid)
@@ -565,6 +572,156 @@ class Management:
         if info["last_result"] != RESULTS[2]:
             raise ApduError(0x6F00, message="import failed on the device: %s" % info["last_result"])
         return res
+
+    # -- single keys -----------------------------------------------------------
+    @staticmethod
+    def app_number(app):
+        """Application number (lf_app_t) of app, a name of APPS or a number."""
+        if type(app) is int and 0 <= app < len(APPS):
+            return app
+        if isinstance(app, str) and app in APPS:
+            return APPS.index(app)
+        raise ValueError("unknown application %r (one of %s)" % (app, ", ".join(APPS)))
+
+    def key_transfer(self):
+        """Applications whose single keys the firmware itself exports and
+        imports (INFO key 19, firmware 2.1.0 on): {"export": names,
+        "import": names}, both empty for older firmware. The other
+        applications take keys through their own applets (librefido.keyio)."""
+        m = self._answer(INS_INFO, what="info")
+        masks = m.get(19) if isinstance(m.get(19), dict) else {}
+
+        def names(mask):
+            return {a for i, a in enumerate(APPS) if type(mask) is int and mask >> i & 1}
+        return {"export": names(masks.get(1, 0)), "import": names(masks.get(2, 0))}
+
+    def list_keys(self, app, pin=None, no_pin=False):
+        """The keys of application app (a name of APPS or its number) as
+        (entries, exportable): entries are the device's descriptor maps
+        (integer keys, docs/KEY_TRANSFER.md; key 1 is the ID export_key()
+        takes), in all pages; exportable is whether the profile and build let
+        secret keys out. The FIDO PIN as for export_profile(). The device asks
+        for a touch before the first page when the application itself only
+        lists with a secret (list_needs_touch()); ApduError 6985 without it.
+        The pages after the first carry the list session ID it answered (no
+        PIN, no touch again); nothing else may be sent to the applet between
+        them."""
+        n = self.app_number(app)
+        entries, cursor, sid = [], 0, None
+        with self.card.transaction(MGMT_AID):
+            data = self._pin_or_none(pin, no_pin, "key list")
+            for _ in range(KEY_LIST_PAGES):
+                req = {1: n}
+                if sid is not None:
+                    req[3], req[4] = cursor, sid
+                    try:
+                        answer = self._cmd(INS_KEY_LIST, data=cbor.encode(req), what="key list")
+                    except ApduError as e:
+                        if e.sw != 0x6982:
+                            raise
+                        raise ApduError(0x6982, message="key list: the device ended the listing (another "
+                                                        "program used the key meanwhile); list again")
+                else:
+                    if data:
+                        req[2] = data
+                    if cursor:
+                        req[3] = cursor
+                    answer = self._pin_cmd(INS_KEY_LIST, data=cbor.encode(req), sent_pin=bool(data),
+                                           what="key list")
+                m = self._map(answer, "key list")
+                page, nxt, nsid = m.get(1), m.get(3), m.get(4)
+                if not isinstance(page, list) or not all(isinstance(e, dict) for e in page) or \
+                        (nxt is not None and (type(nxt) is not int or nxt <= cursor)) or \
+                        (nsid is not None and (not isinstance(nsid, bytes) or len(nsid) != LIST_SESSION_ID_LEN)):
+                    raise ApduError(0x6F00, message="key list: malformed answer from the device")
+                entries += page
+                if nxt is None:
+                    return entries, m.get(2) is True
+                cursor = nxt
+                if nsid is not None:
+                    sid = nsid
+        raise ApduError(0x6F00, message="key list: the device answers page after page")
+
+    def list_needs_touch(self, app, pin=None):
+        """Whether list_keys(app) may wait for a touch: a FIDO listing without
+        the FIDO PIN, an OATH listing (while an OATH password or OTP PIN is
+        set; that is not asked here). A hint for the user interface only: the
+        device decides."""
+        n = self.app_number(app)
+        return (n == APPS.index("fido") and not pin) or n == APPS.index("oath")
+
+    @staticmethod
+    def _key_id(key_id):
+        key_id = bytes(key_id)
+        if not 1 <= len(key_id) <= KEY_ID_MAX:
+            raise ValueError("a key ID has 1 to %d bytes" % KEY_ID_MAX)
+        return key_id
+
+    @staticmethod
+    def _secret(secret):
+        """An application secret (PIN, access code) as sent: text in UTF-8."""
+        return secret.encode("utf-8") if isinstance(secret, str) else bytes(secret)
+
+    def export_key(self, app, key_id, pin=None, no_pin=False, secret=None):
+        """The record (a map, integer keys, docs/KEY_TRANSFER.md) of the key
+        key_id of application app. Needs a touch and the FIDO PIN like
+        export_profile(); an OpenPGP key also the OpenPGP Admin PIN (secret,
+        checked with its retry counter). Refused (6986) by secure and
+        no-export profiles and HARDENED builds."""
+        n = self.app_number(app)
+        req = {1: n, 2: self._key_id(key_id)}
+        if secret:
+            req[4] = self._secret(secret)
+        elif APPS[n] == "openpgp":
+            # Its key store opens with a verified PW3 only: refused before
+            # the touch rather than by the device after it.
+            raise ApduError(0x6982, message="key export: an OpenPGP key needs the OpenPGP Admin PIN")
+        with self.card.transaction(MGMT_AID):
+            data = self._pin_or_none(pin, no_pin, "key export")
+            if data:
+                req[3] = data
+            m = self._map(self._pin_cmd(INS_KEY_EXPORT, data=cbor.encode(req), sent_pin=bool(data),
+                                        what="key export"), "key export")
+        if m.get(1) != n or not isinstance(m.get(2), dict):
+            raise ApduError(0x6F00, message="key export: malformed answer from the device")
+        return m[2]
+
+    def import_key(self, app, record, pin=None, no_pin=False, secret=None, target=None, replace=False):
+        """Adds one key (a record as export_key() gives it) through the
+        firmware: FIDO credentials and OTP slots; the other applications
+        take keys through their own applets (librefido.keyio). Needs a touch
+        and the FIDO PIN like export_profile(). secret: the access code of
+        the target OTP slot when it has one; target: the OTP slot (1 or 2,
+        default the record's); replace: a key already there may be replaced
+        (otherwise 6A89). FIDO imports are refused (6986) by secure profiles
+        and HARDENED builds. Returns the ID of the imported key."""
+        n = self.app_number(app)
+        if not isinstance(record, dict):
+            raise TypeError("record must be a map")
+        req = {1: n, 2: record}
+        if secret:
+            req[4] = self._secret(secret)
+        if replace:
+            req[5] = True
+        if target is not None:
+            req[6] = bytes([target]) if type(target) is int else bytes(target)
+        with self.card.transaction(MGMT_AID):
+            data = self._pin_or_none(pin, no_pin, "key import")
+            if data:
+                req[3] = data
+            try:
+                resp = self._pin_cmd(INS_KEY_IMPORT, data=cbor.encode(req), sent_pin=bool(data), what="key import")
+            except PinRequired as e:
+                # 6982 after a PIN check that passed: the application secret.
+                if secret and e.kind == "unavailable":
+                    raise ApduError(0x6982, message="key import: refused: the access code of the target slot is "
+                                                    "wrong, or the device cannot check the FIDO PIN now (see "
+                                                    "`librefido provision plan`)") from e
+                raise
+        m = self._map(resp, "key import")
+        if m.get(1) != n or not isinstance(m.get(2), bytes):
+            raise ApduError(0x6F00, message="key import: malformed answer from the device")
+        return m[2]
 
     # -- firmware ------------------------------------------------------------
     def update_firmware(self, image, pin=None, allow_downgrade=False, progress=None, confirm=True,
@@ -703,5 +860,5 @@ class Management:
             self._pin_cmd(INS_REBOOT, 1 if bootloader else 0, data=data, sent_pin=bool(data), what="reboot")
 
 
-__all__ = ["Management", "ApduError", "PinRequired", "FirmwareNotStarted", "MGMT_AID", "clip_name",
+__all__ = ["Management", "ApduError", "PinRequired", "FirmwareNotStarted", "MGMT_AID", "APPS", "clip_name",
            "display_name"]

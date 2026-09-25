@@ -6,13 +6,16 @@ import json
 import locale
 import os
 import sys
+import time
 
 from smartcard.Exceptions import CardConnectionException
 
-from . import __version__, policy
-from .backup import BackupError, firmware_supports, read_file, write_file
+from . import __version__, keyio, policy, stdformats
+from .backup import BackupError, _write_private, firmware_supports, read_file, write_file
 from .firmware import FirmwareError
-from .mgmt import Management, PinRequired, clip_name, display_name
+from .keyfile import SingleKey, is_key_file, read_key_file, write_key_file
+from .keyio import KeyTransferError
+from .mgmt import APPS, KEY_ID_MAX, Management, PinRequired, clip_name, display_name
 from .pcsc import ApduError, list_devices
 
 MAX_PROFILES = 4
@@ -56,22 +59,23 @@ def legacy_passphrases(path):
     return out
 
 
-def _passphrase(args, confirm):
-    """Backup passphrase: the first line of --passphrase-file (UTF-8, a BOM
-    and the line end removed) or a prompt. confirm (a new backup) refuses an
-    empty passphrase: only --no-encrypt writes the keys in the clear.
-    Without confirm (reading), a list: this passphrase, then the ones older
-    versions derived from the same file (legacy_passphrases)."""
+def _passphrase(args, confirm, what="Backup", clear_option="--no-encrypt"):
+    """Backup (or key file, what) passphrase: the first line of
+    --passphrase-file (UTF-8, a BOM and the line end removed) or a prompt.
+    confirm (a new file) refuses an empty passphrase: only clear_option
+    writes the keys in the clear. Without confirm (reading), a list: this
+    passphrase, then the ones older versions derived from the same file
+    (legacy_passphrases)."""
     path = getattr(args, "passphrase_file", None)
     if path:
         p = _first_line(path, "passphrase")
     else:
-        p = getpass.getpass("Backup passphrase: ")
+        p = getpass.getpass("%s passphrase: " % what)
         if confirm and getpass.getpass("Repeat passphrase: ") != p:
             sys.exit("passphrases differ")
     if confirm:
         if not p:
-            sys.exit("empty passphrase refused (--no-encrypt writes the keys in the clear)")
+            sys.exit("empty passphrase refused (%s writes the keys in the clear)" % clear_option)
         return p
     return [p] + ([q for q in legacy_passphrases(path) if q != p] if path else [])
 
@@ -601,6 +605,600 @@ def cmd_reboot(args):
     with_session(args, run)
 
 
+# -- single keys (docs/KEY_TRANSFER.md) ---------------------------------------------
+# The helpers that ask nothing are shared with the GUI.
+
+KEY_FORMATS = {"lfkey": None, "otpauth": "oath", "pem": "piv"}      # format: the only application it takes
+KEY_SOURCE_MAX = 1024 * 1024        # key files, PEM and OpenPGP key files are far smaller
+PGP_SLOTS = ("sig", "dec", "aut")
+COSE_ALGS = {-7: "ES256", -8: "EdDSA", -35: "ES384", -36: "ES512", -47: "ES256K", -257: "RS256"}
+PIV_PIN_POLICIES = {0: "default", 1: "never", 2: "once", 3: "always"}
+PIV_TOUCH_POLICIES = {0: "default", 1: "never", 2: "always", 3: "cached"}
+NOT_EXPORTABLE = "this profile or build does not let secret keys out (a secure or no-export profile, or a " \
+                 "HARDENED build)"
+FIDO_EXPORT_NOTE = ("the passkey stays on this key as well. A site that checks signature counters may take a "
+                    "passkey used on two keys for a clone and block it: use it on one key only.")
+FIDO_IMPORT_NOTE = ("the passkey's signature counter goes on from the one of the key it was exported from, as it "
+                    "was at the export. If that key keeps using the passkey, a site that checks signature counters "
+                    "may take it for a clone and block it: use it on one key only.")
+_IMAGE_MAGIC = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a")
+_LINK_SCHEMES = ("otpauth:", "otpauth-migration:")
+_KEY_LIST_REFUSALS = {
+    0x6985: "the key store of the active profile is locked, or its storage is not ready or a restart is pending "
+            "(see `librefido info`)",
+    0x6983: "the FIDO PIN is blocked",
+    0x6A81: "this firmware lists no %s keys",
+    0x6D00: "the firmware cannot list single keys (LibreFido 2.1.0 or newer)",
+}
+# Why a listing waits for a touch: the device never lists more than the
+# application itself gives out without its secret.
+_KEY_LIST_TOUCH = {
+    "fido": "without the FIDO PIN, the device lists passkeys only after a touch",
+    "oath": "while an OATH password or OTP PIN is set, the device lists the accounts only after a touch",
+}
+_SECRET_OPTIONS = {"oath": "--oath-password", "otp": "--access-code", "openpgp": "--admin-pin", "piv": "--mgmt-key"}
+# FIDO without a verified FIDO PIN lists what a getAssertion with user presence
+# alone gives: the credProtect 1 passkeys, without user names (docs/KEY_TRANSFER.md)
+FIDO_NO_PIN_NOTE = ("the passkeys were listed without the FIDO PIN: passkeys that need user verification are only "
+                    "listed with the FIDO PIN, and user names only then (--pin asks for it, --pin-file reads it; a "
+                    "profile without a FIDO PIN lists them once one is set)")
+
+
+def key_entry_text(app, entry, T=lambda s: s):
+    """(name, details) of an entry of Management.list_keys() as text safe to
+    show (names from the device through display_name); T translates the
+    fixed words and the joiner of the details (the GUI: full-width in
+    Chinese)."""
+    def text(v):
+        if isinstance(v, bytes):
+            v = v.decode("utf-8", "replace")
+        return display_name(v) if isinstance(v, str) else "?"
+    e = entry
+    sep = T(", ")
+    try:
+        if app == "fido":
+            user = [text(v) for v in (e.get(4), e.get(5)) if v]
+            if len(user) == 2 and user[0] == user[1]:
+                user.pop()
+            who = "%s (%s)" % tuple(user) if len(user) == 2 else user[0] if user else "ID " + e[6].hex()
+            details = [T("user %s") % who, COSE_ALGS.get(e.get(3), "alg %s" % e.get(3))]
+            if e.get(7):
+                details.append(T("imported"))
+            return text(e[2]), sep.join(details)
+        if app == "oath":
+            details = ["%s %s" % ("HOTP" if e[2] & 0xF0 == stdformats.OATH_HOTP else "TOTP",
+                                  stdformats.OATH_ALGORITHM_NAMES.get(e[2] & 0x0F, "?")), T("%d digits") % e[3]]
+            if e.get(4):
+                details.append(T("touch"))
+            return text(e[1]), sep.join(details)
+        if app == "otp":
+            return T("slot %s") % e[1][0], text(e.get(2)) + (sep + T("access code") if e.get(3) else "")
+        if app == "openpgp":
+            fp = e[3].hex().upper()
+            details = [stdformats.pgp_attr_name(e[2]),
+                       T("fingerprint %s") % " ".join(fp[i:i + 4] for i in range(0, len(fp), 4))]
+            if e.get(4):
+                details.append(T("created %s") % time.strftime("%Y-%m-%d", time.gmtime(e[4])))
+            return T("%s key" % keyio.PGP_SLOT_NAMES[e[1][0]]), sep.join(details)
+        if app == "piv":
+            details = [stdformats.PIV_ALGORITHMS.get(e[2], "algorithm %s" % e[2])]
+            if 3 in e:
+                details.append(T("PIN policy %s") % T(PIV_PIN_POLICIES.get(e[3], str(e[3]))))
+            if 4 in e:
+                details.append(T("touch policy %s") % T(PIV_TOUCH_POLICIES.get(e[4], str(e[4]))))
+            return T("slot %s") % ("%02X" % e[1][0]), sep.join(details)
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError, OverflowError, OSError):
+        pass
+    return "?", T("malformed entry")
+
+
+def key_list_error(app, e, touch=False):
+    """KeyTransferError with a clear message for a refused KEY_LIST (e an
+    ApduError other than PinRequired). touch: the listing may have waited
+    for a touch (Management.list_needs_touch), which 6985 then most likely
+    means was not given."""
+    text = _KEY_LIST_REFUSALS.get(e.sw)
+    if e.sw == 0x6985 and touch:
+        text = "the key was not touched: %s. Touch the key when it blinks and list again (if it did not blink: %s)" \
+               % (_KEY_LIST_TOUCH[app], text)
+    if text is None:
+        return KeyTransferError(str(e), e.sw)
+    return KeyTransferError("key list (%s): %s (SW %04X)" % (app, text % app if "%s" in text else text, e.sw), e.sw)
+
+
+def list_all_keys(m, apps, pin=None, no_pin=False, touch_hint=None):
+    """The keys of the applications apps (names, in this order): ([(app,
+    entry)], exportable, listed), exportable being whether secret keys can
+    be exported (None when no application answered) and listed the
+    applications that did. With more than one application, one whose keys
+    this firmware does not list (6A81) is left out; other refusals raise
+    KeyTransferError (key_list_error), a missing FIDO PIN PinRequired.
+    touch_hint(app) is called before the listing of an application that may
+    wait for a touch."""
+    rows, exportable, listed = [], None, []
+    for app in apps:
+        touch = m.list_needs_touch(app, pin)
+        if touch and touch_hint:
+            touch_hint(app)
+        try:
+            entries, exportable = m.list_keys(app, pin=pin, no_pin=no_pin)
+        except PinRequired:
+            raise
+        except ApduError as e:
+            if e.sw == 0x6A81 and len(apps) > 1:
+                continue
+            raise key_list_error(app, e, touch) from e
+        listed.append(app)
+        rows += [(app, entry) for entry in entries]
+    return rows, exportable, listed
+
+
+def already_there(e):
+    """Whether a KeyTransferError of keyio.import_single refuses to replace
+    a key already where the new one goes (replace=True would replace it).
+    Not every such refusal carries 6A89 (keyio checks some itself), but all
+    of them say so."""
+    return getattr(e, "sw", None) == 0x6A89 or "replace it explicitly" in str(e)
+
+
+def write_key(path, key, fmt, passphrase, warn=None):
+    """Writes key (a SingleKey) to path in format fmt (KEY_FORMATS): a key
+    file, a PEM file (PIV) or an otpauth:// link (OATH: always in the clear).
+    passphrase None writes the key in the clear, which must be the user's
+    confirmed choice. Written privately and atomically; returns the size."""
+    if KEY_FORMATS.get(fmt, key.app) not in (None, key.app):
+        raise ValueError("format %s does not take %s keys" % (fmt, key.app))
+    if fmt == "lfkey":
+        return write_key_file(path, key, passphrase, warn=warn)
+    if fmt == "pem":
+        data = stdformats.piv_record_to_pem(key.record, passphrase)
+    else:
+        if passphrase is not None:
+            raise ValueError("an otpauth:// link cannot be encrypted")
+        data = (stdformats.oath_record_to_uri(key.record) + "\n").encode("utf-8")
+    _write_private(path, data, plaintext=passphrase is None, warn=warn)
+    return len(data)
+
+
+def key_source_kind(data):
+    """What a file to add a key from holds, from its first bytes: "lfkey",
+    "links" (otpauth:// text), "image" (a QR code), "openpgp", "piv" (PEM,
+    DER, PKCS#12), or None."""
+    head = bytes(data[:64])
+    if is_key_file(head):
+        return "lfkey"
+    if head.startswith(_IMAGE_MAGIC) or (head[:4] == b"RIFF" and head[8:12] == b"WEBP"):
+        return "image"
+    if head.lstrip(b"\xef\xbb\xbf \t\r\n").lower().startswith(tuple(s.encode() for s in _LINK_SCHEMES)):
+        return "links"
+    if b"-----BEGIN PGP " in data:
+        return "openpgp"
+    if b"-----BEGIN " in data:
+        return "piv"
+    if head[:1] and head[0] & 0x80:
+        return "openpgp"                    # binary packets (gpg --export-secret-keys)
+    if head[:1] == b"\x30":
+        return "piv"                        # DER: PKCS#8, PKCS#1 / SEC1 or PKCS#12
+    return None
+
+
+def read_key_source(path, app=None):
+    """(data, kind) of a file to add a key from, kind as key_source_kind()
+    tells; app (an application name) settles what the file holds for it.
+    data is None for an image (the QR code is decoded from its file). Raises
+    FormatError for a file larger than KEY_SOURCE_MAX (images excepted) or
+    one that app cannot take."""
+    with open(path, "rb") as f:
+        data = f.read(KEY_SOURCE_MAX + 1)
+    kind = key_source_kind(data)
+    if app is not None and kind != "lfkey":
+        if app == "oath":
+            kind = kind if kind in ("links", "image") else "image"
+        elif app in ("openpgp", "piv"):
+            kind = app
+        else:
+            raise stdformats.FormatError("%s keys are added from LibreFido key files only" % app)
+    if kind == "image":
+        return None, kind
+    if len(data) > KEY_SOURCE_MAX:
+        raise stdformats.FormatError("%s is larger than %d KiB: not a key file" % (path, KEY_SOURCE_MAX // 1024))
+    return data, kind
+
+
+def is_link(text):
+    return text.strip().lower().startswith(_LINK_SCHEMES)
+
+
+def oath_keys_from_links(texts):
+    """OATH keys (SingleKeys) of otpauth:// and otpauth-migration:// links
+    (blank lines ignored) and what the user must be told: (keys, left_out,
+    missing). left_out: why accounts of a Google Authenticator export were
+    left out (the device cannot hold them); missing: {export ID: [QR code
+    numbers, from 1]} of exports split over several QR codes not all among
+    texts. Raises FormatError."""
+    links = [t.strip() for t in texts if t.strip()]
+    if not links:
+        raise stdformats.FormatError("no otpauth:// link")
+    keys, left_out = [], []
+    for link in links:
+        try:
+            records = stdformats.parse_otpauth(link)
+        except stdformats.FormatError as e:
+            if not link.lower().startswith("otpauth-migration:"):
+                raise
+            records = stdformats.parse_otpauth(link, skip_unsupported=True)
+            left_out.append(str(e))
+        keys += [SingleKey("oath", r) for r in records]
+    if not keys:
+        raise stdformats.FormatError("; ".join(left_out) or "no account in the link")
+    missing = {bid: [i + 1 for i in idx] for bid, idx in stdformats.missing_batches(links).items()}
+    return keys, left_out, missing
+
+
+def qr_links(path):
+    """(otpauth links, number of other QR codes) of the QR codes of an image
+    file. Raises FormatError (no QR code, none with a link, no decoder)."""
+    texts = stdformats.decode_qr_image(path)
+    links = [t for t in texts if is_link(t)]
+    if not links:
+        raise stdformats.FormatError("no QR code with an otpauth:// link in %s" % path)
+    return links, len(texts) - len(links)
+
+
+def pgp_key_text(k):
+    """One line about a key of an OpenPGP key file (parse_openpgp_secret)."""
+    return "%s %s [%s]%s %s" % (k["algorithm"], k["key_id"] or "?", ", ".join(sorted(k["usage"])) or "-",
+                                " (primary)" if k["primary"] else "",
+                                display_name(k["user_ids"][0]) if k["user_ids"] else "")
+
+
+def _key_selector(text):
+    """(application, number or None, key ID or None) of a key selector: APP:N
+    (N as `key list` numbers the keys) or APP:hex:ID."""
+    app, sep, rest = text.partition(":")
+    app = app.strip().lower()
+    usage = "key selector %r: APP:N or APP:hex:ID, APP one of %s" % (text, ", ".join(APPS))
+    if not sep or app not in APPS:
+        sys.exit(usage)
+    if rest[:4].lower() == "hex:":
+        try:
+            key_id = bytes.fromhex(rest[4:])
+        except ValueError:
+            sys.exit(usage + " (ID: hex digits)")
+        if not 1 <= len(key_id) <= KEY_ID_MAX:
+            sys.exit(usage + " (ID: 1 to %d bytes)" % KEY_ID_MAX)
+        return app, None, key_id
+    try:
+        number = int(rest, 10)
+    except ValueError:
+        number = 0
+    if number < 1:
+        sys.exit(usage)
+    return app, number, None
+
+
+def _key_support(m, direction, app, verb=None):
+    """Exits with a clear refusal unless the firmware itself exports
+    (direction "export", which includes listing) or imports keys of app."""
+    support = m.key_transfer()
+    if app not in support[direction]:
+        verb = verb or direction
+        if not support["export"] and not support["import"]:
+            sys.exit("refused: the firmware of this device cannot %s single keys (LibreFido 2.1.0 or newer)" % verb)
+        sys.exit("refused: the firmware of this device cannot %s %s keys" % (verb, app))
+
+
+def _list_touch_hint(app):
+    """Before a listing that may wait for a touch (list_all_keys): certain
+    for FIDO without the PIN, for OATH only while it has a password or an
+    OTP PIN."""
+    _touch_hint("list the %s keys" % app, maybe=app != "fido")
+
+
+def _key_at(m, app, number, pin, no_pin, touch_hint=_list_touch_hint):
+    """(key ID, entry) of the number-th key of app as `key list` numbers
+    them; exits when there is none, and before the touch when secret keys
+    cannot be exported. A FIDO listing without the PIN says what it left out."""
+    rows, exportable, _ = list_all_keys(m, [app], pin, no_pin, touch_hint)
+    if app == "fido" and not pin:
+        print("note: %s" % FIDO_NO_PIN_NOTE, file=sys.stderr)
+    if not exportable:
+        sys.exit("refused: %s" % NOT_EXPORTABLE)
+    if number > len(rows):
+        sys.exit("%s:%d: the device lists %d %s key%s (librefido key list --app %s)"
+                 % (app, number, len(rows), app, "" if len(rows) == 1 else "s", app))
+    entry = rows[number - 1][1]
+    key_id = entry.get(1)
+    if not isinstance(key_id, bytes) or not 1 <= len(key_id) <= KEY_ID_MAX:
+        sys.exit("%s:%d: malformed entry from the device" % (app, number))
+    return key_id, entry
+
+
+def _confirm_plaintext(args, what):
+    """The second confirmation of --plaintext: --yes-plaintext, or typed. The
+    question goes to stderr: with -o - standard output is the link itself,
+    which a redirection would otherwise carry the question in front of."""
+    if args.yes_plaintext:
+        return
+    print("%s: anyone with it has your key. Continue? [y/N] " % what, end="", file=sys.stderr, flush=True)
+    answer = sys.stdin.readline()           # "" at the end of the input
+    if answer.strip().lower() not in ("y", "yes"):
+        sys.exit("aborted (--yes-plaintext confirms --plaintext without asking)")
+
+
+def _admin_pin(args):
+    """OpenPGP Admin PIN (PW3): the first line of --admin-pin-file, or typed."""
+    path = getattr(args, "admin_pin_file", None)
+    pin = _first_line(path, "Admin PIN") if path else getpass.getpass("OpenPGP Admin PIN: ")
+    if not pin:
+        sys.exit("the OpenPGP Admin PIN is needed")
+    return pin
+
+
+def _file_secret(args, prompt):
+    """Password of a PIV or OpenPGP key file: the first line of
+    --passphrase-file, or typed."""
+    path = getattr(args, "passphrase_file", None)
+    return _first_line(path, "passphrase") if path else getpass.getpass(prompt)
+
+
+def cmd_key_list(args):
+    def run(m):
+        support = m.key_transfer()["export"]
+        if not support:
+            sys.exit("refused: the firmware of this device cannot list single keys (LibreFido 2.1.0 or newer)")
+        if args.app != "all" and args.app not in support:
+            sys.exit("refused: the firmware of this device lists no %s keys" % args.app)
+        apps = [a for a in APPS if a in support and args.app in ("all", a)]
+        pin, no_pin = _fido_pin(m, _pin_file(args), args.no_pin, ask=args.pin)
+        used = []                               # the PIN of the listing that answered (_with_pin may ask)
+
+        def listing(pin, no_pin):
+            used[:] = [pin]
+            return list_all_keys(m, apps, pin, no_pin, _list_touch_hint)
+        rows, exportable, listed = _with_pin(listing, pin, no_pin)
+        if "fido" in listed and not used[0]:
+            print("note: %s" % FIDO_NO_PIN_NOTE, file=sys.stderr)
+        keys, numbers = [], dict.fromkeys(listed, 0)
+        for app, entry in rows:
+            numbers[app] += 1
+            name, details = key_entry_text(app, entry)
+            key_id = entry.get(1)
+            keys.append({"app": app, "selector": "%s:%d" % (app, numbers[app]), "name": name, "details": details,
+                         "id": key_id.hex() if isinstance(key_id, bytes) else None})
+        if args.json:
+            _print({"exportable": exportable, "applications": listed, "keys": keys}, True)
+            return
+        for app in listed:
+            n = numbers[app]
+            print("%s: %s" % (app, "%d key%s" % (n, "" if n == 1 else "s") if n else "no keys"))
+            for k in keys:
+                if k["app"] == app:
+                    print("  %-9s %s  %s" % (k["selector"], k["name"], k["details"]))
+        if exportable is not None:
+            print("secret keys can be exported: %s" % ("yes" if exportable else "no: " + NOT_EXPORTABLE))
+    with_session(args, run)
+
+
+def cmd_key_export(args):
+    app, number, key_id = _key_selector(args.selector)
+    fmt = args.format
+    if KEY_FORMATS[fmt] not in (None, app):
+        sys.exit("--format %s is for %s keys only" % (fmt, KEY_FORMATS[fmt]))
+    if (args.admin_pin or args.admin_pin_file) and app != "openpgp":
+        sys.exit("--admin-pin is for OpenPGP keys")
+    if args.yes_plaintext and not args.plaintext:
+        sys.exit("--yes-plaintext confirms --plaintext, which is missing")
+    if fmt == "otpauth" and not args.plaintext:
+        sys.exit("refused: an otpauth:// link holds the secret in the clear; add --plaintext to write one "
+                 "(--format lfkey writes an encrypted key file)")
+    if args.output == "-" and fmt != "otpauth":
+        sys.exit("-o - (standard output) is for --format otpauth only")
+    passphrase = None
+    if args.plaintext:
+        _confirm_plaintext(args, "The otpauth:// link holds the secret in the clear" if fmt == "otpauth" else
+                           "The key will NOT be encrypted")
+    else:
+        passphrase = _passphrase(args, confirm=True, what="Key file" if fmt == "lfkey" else "PEM",
+                                 clear_option="--plaintext")
+
+    def run(m):
+        _key_support(m, "export", app)
+        pin, no_pin = _fido_pin(m, _pin_file(args), args.no_pin, ask=args.pin)
+        admin = _admin_pin(args) if app == "openpgp" else None      # asked before the touch
+
+        def export(pin, no_pin):
+            # fido:N without the PIN: the listing that finds N needs a touch of its own
+            two = key_id is None and app == "fido" and m.list_needs_touch(app, pin)
+            if key_id is not None:
+                kid, what = key_id, "%s key %s" % (app, key_id.hex())
+            elif two:
+                kid, entry = _key_at(m, app, number, pin, no_pin, lambda a: _touch_hint(
+                    "list the fido keys (touch 1 of 2: without the FIDO PIN, the listing and the export need one "
+                    "each)"))
+                what = "%s:%d (%s), touch 2 of 2" % (app, number, key_entry_text(app, entry)[0])
+            else:
+                kid, entry = _key_at(m, app, number, pin, no_pin)
+                what = "%s:%d (%s)" % (app, number, key_entry_text(app, entry)[0])
+            _touch_hint("export %s" % what)
+            return keyio.export_single(m, app, kid, pin=pin, no_pin=no_pin, secret=admin)
+        key = _with_pin(export, pin, no_pin)
+        if app == "fido":
+            print("note (sign counter): %s" % FIDO_EXPORT_NOTE, file=sys.stderr)
+        if args.output == "-":
+            print(stdformats.oath_record_to_uri(key.record))
+            return
+        n = write_key(args.output, key, fmt, passphrase, warn=lambda msg: print("warning: %s" % msg, file=sys.stderr))
+        print("wrote %s (%d bytes, %s): %s" % (args.output, n, "encrypted" if passphrase is not None else
+                                                "NOT encrypted: anyone with this file has the key", keyio.describe(key)))
+    with_session(args, run)
+
+
+def _read_key_file(args, path, data):
+    info, key = read_key_file(data)
+    if info["encrypted"]:
+        info, key = read_key_file(data, _passphrase(args, confirm=False, what="Key file"), require_encryption=True)
+    elif not args.allow_unencrypted:
+        sys.exit("refused: %s is NOT encrypted, so nothing proves it was not replaced; add --allow-unencrypted if "
+                 "you wrote it with --plaintext" % path)
+    else:
+        print("warning: %s is NOT encrypted, nothing proves it was not modified" % path, file=sys.stderr)
+    return key
+
+
+def _oath_keys(texts):
+    keys, left_out, missing = oath_keys_from_links(texts)
+    for why in left_out:
+        print("warning: left out: %s" % why, file=sys.stderr)
+    for numbers in missing.values():
+        print("warning: this Google Authenticator export is split over several QR codes: number%s %s %s not "
+              "here (add %s too)" % ("" if len(numbers) == 1 else "s", ", ".join(map(str, numbers)),
+                                     "is" if len(numbers) == 1 else "are", "it" if len(numbers) == 1 else "them"),
+              file=sys.stderr)
+    return keys
+
+
+def _read_piv_key(args, path, data):
+    try:
+        found = stdformats.load_piv_key(data)
+    except stdformats.PassphraseRequired:
+        found = stdformats.load_piv_key(data, _file_secret(args, "Password of %s: " % path))
+    if len(found) != 1:
+        sys.exit("%s holds %d private keys: add them from files with one each" % (path, len(found)))
+    record, cert = found[0]
+    if cert:
+        record[8] = cert
+    return SingleKey("piv", record)
+
+
+def _read_pgp_key(args, path, data):
+    """The key of an OpenPGP key file to add, and its card slot: --key-id and
+    --slot choose among the keys the card can take (not revoked)."""
+    try:
+        found = stdformats.parse_openpgp_secret(data)
+    except stdformats.PassphraseRequired:
+        found = stdformats.parse_openpgp_secret(data, _file_secret(args, "Passphrase of the OpenPGP key: "))
+    usable = [k for k in found if k["record"] is not None and not k["revoked"]]
+    for k in found:
+        if k not in usable:
+            print("note: %s left out: %s" % (pgp_key_text(k), "revoked" if k["revoked"] else k["unsupported"]),
+                  file=sys.stderr)
+    slot = args.slot
+    if slot is not None and slot not in PGP_SLOTS:
+        sys.exit("--slot of an OpenPGP key: sig, dec or aut")
+    if args.key_id:
+        want = args.key_id.replace(" ", "").upper()
+        want = want[2:] if want.startswith("0X") else want
+        usable = [k for k in usable if want and k["fingerprint"].hex().upper().endswith(want)]
+    elif slot:
+        usable = [k for k in usable if slot in k["usage"]]
+    if len(usable) != 1:
+        sys.exit("%s: %s; choose one with --key-id (and --slot sig, dec or aut):\n%s" % (
+            path, "no key the card can take fits" if not usable else "%d keys fit" % len(usable),
+            "\n".join("  " + pgp_key_text(k) for k in (usable or found))))
+    k = usable[0]
+    if slot is None:
+        fits = [s for s in PGP_SLOTS if s in k["usage"]]
+        if len(fits) != 1:
+            sys.exit("--slot sig, dec or aut: where the key %s goes (it is for %s)" % (
+                k["key_id"], ", ".join(sorted(k["usage"])) or "nothing"))
+        slot = fits[0]
+    return SingleKey("openpgp", k["record"]), slot
+
+
+def _key_source(args):
+    """The keys of the import SOURCE, read, decrypted and checked (one, or
+    the OATH accounts of links or QR codes), and the OpenPGP slot the chosen
+    key of an OpenPGP key file goes to (else None)."""
+    src, app = args.source, args.app
+    if src == "-" or is_link(src):
+        if app not in (None, "oath"):
+            sys.exit("an otpauth link holds OATH accounts, not a %s key" % app)
+        if src != "-":
+            print("warning: the link is on the command line, where other users of this computer can see it (- "
+                  "reads it from standard input)", file=sys.stderr)
+            return _oath_keys([src]), None
+        return _oath_keys(sys.stdin.read(KEY_SOURCE_MAX).splitlines()), None
+    data, kind = read_key_source(src, app)
+    if kind is None:
+        sys.exit("cannot tell what %s holds: --app names the application" % src)
+    if kind == "lfkey":
+        key = _read_key_file(args, src, data)
+        if app not in (None, key.app):
+            sys.exit("%s holds a %s key, --app says %s" % (src, key.app, app))
+        return [key], None
+    if kind == "links":
+        return _oath_keys(data.decode("utf-8", "replace").splitlines()), None
+    if kind == "image":
+        links, others = qr_links(src)
+        if others:
+            print("note: %d QR code%s without an otpauth link left out" % (others, "" if others == 1 else "s"),
+                  file=sys.stderr)
+        return _oath_keys(links), None
+    if kind == "piv":
+        return [_read_piv_key(args, src, data)], None
+    key, slot = _read_pgp_key(args, src, data)
+    return [key], slot
+
+
+def _import_hint(app, e):
+    if already_there(e):
+        return " (--replace replaces it)"
+    if str(e).endswith("give it") and app in _SECRET_OPTIONS:
+        return " (%s)" % _SECRET_OPTIONS[app]
+    return ""
+
+
+def cmd_key_import(args):
+    if args.slot is not None:
+        args.slot = args.slot.strip().lower()
+    keys, pgp_slot = _key_source(args)          # the passphrase before the device: the file says which key it is
+    app = keys[0].app
+    for option, owner in (("oath_password", "oath"), ("access_code", "otp"), ("mgmt_key", "piv"),
+                          ("admin_pin", "openpgp"), ("admin_pin_file", "openpgp")):
+        if getattr(args, option) and app != owner:
+            sys.exit("--%s is for %s keys (this is a %s key)" % (option.replace("_", "-"), owner, app))
+    opts = {}
+    if args.slot is not None:
+        if app in ("fido", "oath"):
+            sys.exit("--slot is not used for %s keys" % app)
+        if app == "openpgp" and args.slot not in PGP_SLOTS:
+            sys.exit("--slot of an OpenPGP key: sig, dec or aut")
+        opts[{"otp": "target", "piv": "piv_slot", "openpgp": "pgp_key_ref"}[app]] = args.slot
+    if pgp_slot:
+        opts["pgp_key_ref"] = pgp_slot
+    if app == "piv" and "piv_slot" not in opts and not isinstance(keys[0].record.get(1), int):
+        sys.exit("--slot is needed: the PIV slot for the key (9A, 9C, 9D, 9E or 82 to 95)")
+    # The applications' own secrets, before the device is opened.
+    if args.oath_password:
+        opts["oath_password"] = getpass.getpass("OATH password: ")
+    if args.access_code:
+        opts["otp_access_code"] = getpass.getpass("Access code of the target OTP slot (12 hex digits): ")
+    if app == "openpgp":
+        opts["pgp_admin_pin"] = _admin_pin(args)
+    if args.mgmt_key:
+        opts["piv_mgmt_key"] = getpass.getpass("PIV management key (hex): ") if args.mgmt_key == "-" \
+            else args.mgmt_key
+
+    def run(m):
+        pin, no_pin = None, False
+        if app in ("fido", "otp"):
+            _key_support(m, "import", app)
+            pin, no_pin = _fido_pin(m, _pin_file(args), args.no_pin, ask=args.pin)
+        if app == "fido":
+            print("note (sign counter): %s" % FIDO_IMPORT_NOTE, file=sys.stderr)
+        for i, key in enumerate(keys):
+            def add(pin, no_pin, key=key):
+                if key.app in ("fido", "otp"):
+                    _touch_hint("add the %s" % keyio.describe(key))
+                return keyio.import_single(m, key, pin=pin, no_pin=no_pin, replace=args.replace, **opts)
+            try:
+                print(_with_pin(add, pin, no_pin))
+            except KeyTransferError as e:
+                sys.exit("refused: %s%s%s" % (e, _import_hint(app, e), " (%d added before it)" % i if i else ""))
+    with_session(args, run)
+
+
 def with_session(args, fn):
     m = Management.open(args.reader, timeout=args.wait)
     try:
@@ -712,10 +1310,64 @@ def main(argv=None):
     _pin_options(rb, " (with --bootloader)")
     rb.set_defaults(fn=cmd_reboot)
 
+    ky = sub.add_parser("key", help="single keys of the active profile: list, export one, add one "
+                                    "(docs/KEY_TRANSFER.md)")
+    ksub = ky.add_subparsers(dest="action", required=True)
+    kl = ksub.add_parser("list", help="the keys of the active profile, numbered for export (a touch for FIDO "
+                                      "without the PIN, which then lists only the passkeys that need no user "
+                                      "verification, without user names; for OATH with a password)")
+    kl.add_argument("--app", choices=list(APPS) + ["all"], default="all")
+    _pin_options(kl, "")
+    kl.set_defaults(fn=cmd_key_list)
+    ke = ksub.add_parser("export", help="one key to a file, encrypted with a passphrase (touch, FIDO PIN if set; "
+                                        "fido:N without the FIDO PIN: two touches, listing and export)")
+    ke.add_argument("selector", help="APP:N as `key list` numbers the keys (e.g. fido:2), or APP:hex:ID (the IDs: "
+                                     "librefido --json key list)")
+    ke.add_argument("-o", "--output", required=True, metavar="FILE",
+                    help="the file to write (- : standard output, for --format otpauth only)")
+    ke.add_argument("--format", choices=list(KEY_FORMATS), default="lfkey",
+                    help="lfkey: LibreFido key file (default); otpauth: otpauth:// link of an OATH account (always "
+                         "in the clear); pem: PKCS#8 PEM of a PIV key and its certificate")
+    ke.add_argument("--plaintext", action="store_true", help="write the key in the clear (asks to confirm)")
+    ke.add_argument("--yes-plaintext", action="store_true", help="confirm --plaintext without asking (scripts)")
+    ke.add_argument("--passphrase-file", help="first line (UTF-8) is the passphrase")
+    ke.add_argument("--admin-pin", action="store_true",
+                    help="ask for the OpenPGP Admin PIN (always asked for an OpenPGP key)")
+    ke.add_argument("--admin-pin-file", help="first line (UTF-8) is the OpenPGP Admin PIN")
+    _pin_options(ke, "")
+    ke.set_defaults(fn=cmd_key_export)
+    ki = ksub.add_parser("import", help="add one key (or the OATH accounts of a link): a key file, an otpauth:// "
+                                        "or otpauth-migration:// link, a QR code image, a PIV key (PEM, DER, "
+                                        "PKCS#12) or an OpenPGP secret key file")
+    ki.add_argument("source", help="a file, a link, or - to read links from standard input (a link on the command "
+                                   "line can be seen by other users)")
+    ki.add_argument("--app", choices=APPS, help="what SOURCE holds, when the file does not tell")
+    ki.add_argument("--slot", help="OTP: 1 or 2; PIV: 9A, 9C, 9D, 9E, 82..95; OpenPGP: sig, dec or aut (default: "
+                                   "the key file's)")
+    ki.add_argument("--key-id", help="OpenPGP key file: the key to add (key ID or fingerprint, hex)")
+    ki.add_argument("--replace", action="store_true", help="replace a key already there (otherwise refused)")
+    ki.add_argument("--passphrase-file", help="first line (UTF-8) is the passphrase of the key file (or the "
+                                              "password of the PIV or OpenPGP key)")
+    ki.add_argument("--allow-unencrypted", action="store_true",
+                    help="accept a key file written with --plaintext (nothing authenticates its content)")
+    ki.add_argument("--oath-password", action="store_true",
+                    help="ask for the OATH password (when the OATH application has one)")
+    ki.add_argument("--access-code", action="store_true",
+                    help="ask for the access code of the target OTP slot (12 hex digits)")
+    ki.add_argument("--admin-pin", action="store_true",
+                    help="ask for the OpenPGP Admin PIN (always asked for an OpenPGP key)")
+    ki.add_argument("--admin-pin-file", help="first line (UTF-8) is the OpenPGP Admin PIN")
+    ki.add_argument("--mgmt-key", metavar="HEX|-",
+                    help="PIV management key, or - to type it (a key on the command line can be seen by other "
+                         "users); default: the default key, when the device still has it")
+    _pin_options(ki, " (FIDO and OTP keys)")
+    ki.set_defaults(fn=cmd_key_import)
+
     args = p.parse_args(argv)
     try:
         args.fn(args)
-    except (ApduError, BackupError, FirmwareError, RuntimeError, OSError, CardConnectionException) as e:
+    except (ApduError, BackupError, FirmwareError, RuntimeError, OSError, CardConnectionException,
+            KeyTransferError, stdformats.FormatError) as e:
         sys.exit("error: %s" % e)
 
 

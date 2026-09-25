@@ -11,13 +11,13 @@ FIDO certification of any level.
 | Attacker | Protected? | By what |
 |---|---|---|
 | Malicious website / relying party | yes | WebAuthn origin binding, per-RP keys, self attestation (no cross-site identifier) |
-| Malicious host software, key plugged in, no touch | mostly | every FIDO registration and assertion (unless the owner switched automatic presence on for FIDO, see *Profiles*), every reset, export, import (into any slot, restore tests included), profile creation, switch, wipe or deletion, firmware update or rollback, restart (ROM loader included), eFuse provisioning and maintenance write needs a physical touch collected for that command (exports, updates, rollbacks, the ROM loader and an import into the active slot also the FIDO PIN of the active profile when one is set, even while its key store is locked); OpenPGP and PIV operations need their PIN, and a touch where the key's touch policy says so. Names, colours, button slots and board settings need no touch for 16 changes, then one touch (which renews the allowance); the count is kept in the system area, so restarts do not renew it and the system area cannot be worn out. Checking a backup without importing it writes nothing |
+| Malicious host software, key plugged in, no touch | mostly | every FIDO registration and assertion (unless the owner switched automatic presence on for FIDO, see *Profiles*), every reset, export (of a profile or a single key), import (into any slot, restore tests included; a single FIDO credential or OTP slot), profile creation, switch, wipe or deletion, firmware update or rollback, restart (ROM loader included), eFuse provisioning and maintenance write needs a physical touch collected for that command (exports, updates, rollbacks, the ROM loader and an import into the active slot also the FIDO PIN of the active profile when one is set, even while its key store is locked); OpenPGP and PIV operations need their PIN, and a touch where the key's touch policy says so. Names, colours, button slots and board settings need no touch for 16 changes, then one touch (which renews the allowance); the count is kept in the system area, so restarts do not renew it and the system area cannot be worn out. Checking a backup without importing it writes nothing |
 | Malicious host software with the user touching | **no** | a touch authorizes whatever the host asked for; the PIN limits what can be exported. An import into the active slot asks for its PIN, but an import into another slot followed by a switch needs two touches and no PIN. An update asks for the PIN of the active profile only: a host that gets the user to touch for a profile switch first can update from a profile without a PIN |
 | Thief with the key, no PIN known | partly | PIN retry counters (FIDO 8, OpenPGP/PIV 3); but see *flash dump* |
 | Thief who dumps the flash (root key not bound, no flash encryption) | **no** | the root key of a profile that is not bound to the chip is stored in flash as it is (the chip serial in its record protects nothing): a dump reveals everything |
 | Thief who dumps the flash (root key bound to the chip, flash encryption) | yes, unless the chip is also attacked | the root key is wrapped with a key derived from an HMAC eFuse key the software cannot read; the rest of the store (OATH/OTP secrets, the staging area while a transfer runs) only by flash encryption |
 | Fault injection, side channels, decapping | **no** | not in scope for this hardware |
-| Someone with a backup file | only its passphrase | scrypt (N=2^17) + ChaCha20-Poly1305; an unencrypted backup is the keys |
+| Someone with a backup file or a single-key file | only its passphrase | scrypt (N=2^17) + ChaCha20-Poly1305; an unencrypted backup or key file is the keys |
 
 ## Keys
 
@@ -210,6 +210,17 @@ A clone is a restore on another device: the root key is re-wrapped by the
 target chip. Counters come along; if the original keeps being used, relying
 parties that check counters may notice the clone (by design of FIDO).
 
+**Single keys** (firmware 2.1.0, [KEY_TRANSFER.md](KEY_TRANSFER.md)): one
+FIDO discoverable credential, OATH account, OTP slot, OpenPGP key or PIV key
+leaves the device under the same bar as a backup (export policy of the
+profile, FIDO PIN when set, touch; an OpenPGP key also its Admin PIN) and is
+written by the tools into a key file protected like a backup file. A FIDO
+credential or an OTP slot comes in through the management applet (FIDO PIN,
+touch; FIDO credentials never into a secure profile or a HARDENED build),
+OATH, OpenPGP and PIV keys through their own applications and their own
+authentication. The copy is a second authenticator with the same key; the
+same counter caveat applies.
+
 ## Firmware updates
 
 Two application slots. An update is written to the inactive slot, checked
@@ -255,9 +266,13 @@ rollback, or an update (even an explicit downgrade), to an image of an older
 format is refused (6986): the sealed keys would be unusable. Before the
 confirmation going back always works, explicitly or by the reset that rolls
 an unconfirmed update back; keys created while the new firmware was on
-trial are written sealed already and are lost by that rollback. Backups
-made by 2.0.1 need 2.0.1 to be imported (2.0.0 refuses them); backups of
-2.0.0 still import.
+trial are written sealed already and are lost by that rollback. 2.1.0 keeps
+format 2: it adds one kind of record, the FIDO credential of a single-key
+import ([KEY_TRANSFER.md](KEY_TRANSFER.md)), which 2.0.1 keeps but cannot
+use. Backups name the oldest firmware that may import them: those made by
+2.0.1 need 2.0.1 (2.0.0 refuses them), those made by 2.1.0 need 2.1.0 (the
+profile may hold such credentials); backups of 2.0.0 and 2.0.1 still
+import.
 
 **Recovery of a HARDENED device**: on a Secure Boot chip, a signed HARDENED
 image through `librefido update` (also in safe mode, with a touch only) or a

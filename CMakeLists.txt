@@ -110,6 +110,8 @@ list(APPEND SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/pico-fido/src/fido/cbor_large_blobs.c
     ${CMAKE_CURRENT_LIST_DIR}/pico-fido/src/fido/management.c
     ${CMAKE_CURRENT_LIST_DIR}/pico-fido/src/fido/defs.c
+    ${CMAKE_CURRENT_LIST_DIR}/pico-fido/src/fido/lf_keyio_fido.c
+    ${CMAKE_CURRENT_LIST_DIR}/pico-openpgp/src/openpgp/lf_keyio_pgp.c
     ${CMAKE_CURRENT_LIST_DIR}/pico-openpgp/src/openpgp/openpgp.c
     ${CMAKE_CURRENT_LIST_DIR}/pico-openpgp/src/openpgp/piv.c
     ${CMAKE_CURRENT_LIST_DIR}/pico-openpgp/src/openpgp/cmd_select.c
@@ -133,11 +135,13 @@ list(APPEND SOURCES
 if(ENABLE_OATH_APP)
     list(APPEND SOURCES
         ${CMAKE_CURRENT_LIST_DIR}/pico-fido/src/fido/oath.c
+        ${CMAKE_CURRENT_LIST_DIR}/pico-fido/src/fido/lf_keyio_oath.c
     )
 endif()
 if(ENABLE_OTP_APP)
     list(APPEND SOURCES
         ${CMAKE_CURRENT_LIST_DIR}/pico-fido/src/fido/otp.c
+        ${CMAKE_CURRENT_LIST_DIR}/pico-fido/src/fido/lf_keyio_otp.c
     )
 endif()
 

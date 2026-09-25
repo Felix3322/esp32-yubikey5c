@@ -42,7 +42,8 @@ Automated results of this revision are in [TESTING.md](TESTING.md).
 | UIF (touch) per key | PASS | `test_presence_policy.py` |
 | KDF-DO | UNTESTED | |
 | GnuPG: card-status, generate, sign, encrypt/decrypt, passwd, keytocard | PASS | `test_gnupg_flow.py` |
-| SSH through gpg-agent | UNTESTED | (same card operations as `gpg --sign` with the authentication key) |
+| SSH through gpg-agent (Ed25519, NIST P-256, RSA 2048 authentication key) | PASS (emulator) | `tests/manager/test_mgr_pgp.py::test_gnupg_signs_with_the_authentication_key` (GnuPG 2.4.4 gpg-agent, `ssh-keygen -Y sign` / `-Y verify`); SSH data signed as given: `test_openpgp_25519.py::test_internal_authenticate_signs_the_data_as_given` |
+| Authentication key as an OpenPGP signing subkey | PASS for RSA and ECDSA; Ed25519 needs GnuPG 2.5.8 or later | `test_gnupg_signs_with_the_authentication_key`; see [GnuPG and an Ed25519 authentication key](#gnupg-and-an-ed25519-authentication-key) |
 
 ### PIV (SP 800-73-4 plus YubiKey extensions)
 
@@ -75,6 +76,8 @@ Automated results of this revision are in [TESTING.md](TESTING.md).
 |---|---|---|
 | Up to four isolated profiles, switched by the button, LED colour per profile | PASS | `tests/profiles/test_profiles_backup.py` |
 | Versioned, optionally encrypted backups, clone, restore test, offline verify | PASS | `test_profiles_backup.py`, `tests/tools` |
+| Single-key export / import (firmware 2.1.0): FIDO discoverable credentials, OATH accounts, OTP slots, OpenPGP and PIV keys, encrypted `.lfkey` files ([KEY_TRANSFER.md](KEY_TRANSFER.md)) | PASS | `tests/keys`; host side `tests/tools/test_keyfile.py`, `test_cli.py`, `test_gui.py` |
+| Keys from standard formats: `otpauth://` and Google Authenticator export links and QR codes, PIV PEM / DER / PKCS#12, OpenPGP secret key files (`gpg --export-secret-keys`) | PASS (QR codes: checked by hand on Windows with OpenCV 4.13; the automated test environment has no decoder) | `tests/tools/test_stdformats.py`, `tests/keys` |
 | Power-cut safe storage, A/B copies, Reed-Solomon parity, self repair | PASS | `tests/storage`, `tests/unit` |
 | A/B firmware update with rollback and storage-format rule | PASS | `test_firmware_update.py` |
 | Secure profiles, per-application automatic presence, LED brightness | PASS | `tests/profiles/test_policies.py`, `tests/fido/test_presence_policy.py` |
@@ -126,6 +129,34 @@ refuse it; LibreFido does not try to get around such policies.
 | Windows 11 PC/SC (librefido, OpenPGP, PIV, OATH) | CCID | PASS (hardware, firmware 2.0.0) | no admin rights needed |
 | Linux pcsc-lite, python-fido2, libfido2 | CCID, HID | PASS (emulator) | |
 | macOS | HID, CCID | UNTESTED | |
+
+### GnuPG and an Ed25519 authentication key
+
+GnuPG before 2.5.8 (the 2.4 series: 2.4.4 of Ubuntu 24.04 tested, the code of
+2.4.5 to 2.4.9 read) makes BAD
+signatures with a signing subkey made from the card's **Ed25519
+authentication key** ("Existing key from card", key 3). SSH with that key and
+signing with the card's signature key are not affected, nor are RSA and ECDSA
+authentication keys. It is a GnuPG bug (GnuPG bug 7589, fixed by GnuPG commit
+eb7d5d4d85, first released in 2.5.8); the card behaves as the OpenPGP card
+specification 3.4 (7.2.13) says, and firmware 2.1.0 does not work around it:
+
+- For a signature with the authentication key, scdaemon (`do_sign`, then
+  `do_auth`) puts the 19-byte SHA-2 DigestInfo in front of the hash, and
+  before INTERNAL AUTHENTICATE strips 19 bytes of it for ECDSA but only 15
+  for EdDSA (15 is the SHA-1 DigestInfo that gpg-agent puts in front of
+  SSH data).
+- The scdaemon log (`debug-level guru`) of GnuPG 2.4.4 against the emulator
+  shows `00 88 00 00 44 05 00 04 40 <64-byte SHA-512 hash>`: 68 bytes, the
+  last 4 bytes of the DigestInfo, then the hash. For SSH it sends the SSH
+  data as it is.
+- For EdDSA the card signs the data field as given (PureEdDSA), whatever it
+  looks like; so the signature is valid for those 68 bytes, not for the hash
+  GnuPG verifies. A card that guessed and stripped a prefix would sign
+  something other than what the host sent.
+
+Use GnuPG 2.5.8 or later for such a subkey, or sign with the signature key
+(key 1), or use an RSA or ECDSA authentication key.
 
 ## USB identity
 

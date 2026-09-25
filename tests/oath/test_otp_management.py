@@ -155,6 +155,45 @@ def test_yubikit_swap_over_the_smart_card_interface(device):
         card.close()
 
 
+def test_status_tells_touch_triggered_slots(device):
+    """The configuration state marks the slots that are triggered by a touch,
+    as yubikit's ConfigState.is_touch_triggered reads it ("not
+    challenge-response"): the ones that type (OATH-HOTP too, whose ticket
+    flag is the challenge-response flag), never a challenge-response slot,
+    not even one that waits for the button (a press types nothing)."""
+    yubiotp = pytest.importorskip("yubikit.yubiotp")
+    from harness.card import YkConnection
+    device()
+    card = open_card()
+    try:
+        s = yubiotp.YubiOtpSession(YkConnection(card))
+        cases = [
+            ("hotp", yubiotp.HotpSlotConfiguration(RFC4226_SECRET), True),
+            ("hotp8-modhex", yubiotp.HotpSlotConfiguration(RFC4226_SECRET).digits8(True)
+             .token_id(b"\x01\x02\x03\x04\x05\x06", True, True), True),
+            ("yubico-otp", yubiotp.YubiOtpSlotConfiguration(b"\xff\x00\x01\x02\x03\x04", bytes(6), KEY20[:16]), True),
+            ("static", yubiotp.StaticPasswordSlotConfiguration(b"\x04\x05\x06"), True),
+            ("chal-hmac", yubiotp.HmacSha1SlotConfiguration(KEY20), False),
+            ("chal-hmac-touch", yubiotp.HmacSha1SlotConfiguration(KEY20).require_touch(True), False),
+        ]
+        got = {}
+        for name, cfg, _ in cases:
+            for slot in (yubiotp.SLOT.ONE, yubiotp.SLOT.TWO):
+                s.put_configuration(slot, cfg)
+                state = s.get_config_state()
+                got[name, int(slot)] = (state.is_configured(slot), state.is_touch_triggered(slot))
+        assert got == {(name, slot): (True, want) for name, _, want in cases for slot in (1, 2)}
+        s.put_configuration(yubiotp.SLOT.TWO, yubiotp.HotpSlotConfiguration(RFC4226_SECRET))
+        s.delete_slot(yubiotp.SLOT.ONE)
+        state = s.get_config_state()
+        assert not state.is_configured(yubiotp.SLOT.ONE) and not state.is_touch_triggered(yubiotp.SLOT.ONE)
+        # the same state after SELECT (a new session)
+        state = yubiotp.YubiOtpSession(YkConnection(card)).get_config_state()
+        assert state.is_configured(yubiotp.SLOT.TWO) and state.is_touch_triggered(yubiotp.SLOT.TWO)
+    finally:
+        card.close()
+
+
 def test_challenge_response(device):
     yubiotp = pytest.importorskip("yubikit.yubiotp")
     device(LF_EMU_UP="manual", LF_EMU_UP_TIMEOUT_MS="1000")

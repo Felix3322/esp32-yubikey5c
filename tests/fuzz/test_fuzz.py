@@ -20,6 +20,7 @@ import struct
 import time
 
 import pytest
+from fido2 import cbor
 
 from harness import ctaphid
 from harness.card import Card
@@ -43,6 +44,20 @@ def tlv(tag, value):
     n = len(value)
     ln = bytes([n]) if n < 0x80 else (bytes([0x81, n]) if n < 0x100 else b"\x82" + n.to_bytes(2, "big"))
     return tag + ln + value
+
+
+# CBOR the encoder cannot make: tags (canonical CTAP2 CBOR and the management
+# requests have none) wherever the parsers read a key or a value.
+E = cbor.encode
+
+
+def cmap(*pairs):
+    """A map of already encoded (key, value) pairs, in the given order."""
+    return bytes([0xA0 + len(pairs)]) + b"".join(k + v for k, v in pairs)
+
+
+def tagged(tag, item):
+    return bytes([0xC0 + tag]) + item if tag < 24 else b"\xd8" + bytes([tag]) + item
 
 
 # Seeds: (cla, ins, p1, p2, data) of well-formed commands per applet.
@@ -101,13 +116,35 @@ SEEDS = {
         (0x00, 0x01, 0x03, 0x00, b"\x00" * 64), (0x00, 0x02, 0x07, 0x00, b"\x00" * 32 + b"\x00" * 32 + b"\x40" + b"\x00" * 64),
         (0x00, 0x03, 0x00, 0x00, b""),
     ]),
-    # read-only management commands only: the others reboot or wipe
+    # read-only management commands only: the others reboot or wipe. The
+    # single-key commands (60 KEY_LIST, 61 KEY_EXPORT, 62 KEY_IMPORT) carry
+    # no PIN or application secret (a wrong one would use up a retry of the
+    # session's emulator) and records the firmware refuses (an empty rpId,
+    # the OTP erase form, whose CRC a mutation breaks): nothing is stored.
     "lfmgmt": (AID_LFMGMT, [
         (0x80, 0x01, 0x00, 0x00, b""), (0x80, 0x02, 0x00, 0x00, b""),
         (0x80, 0x21, 0x00, 0x00, b"\x00" * 16), (0x80, 0x29, 0x00, 0x00, b"\x00" * 64),
+        (0x80, 0x60, 0x00, 0x00, cbor.encode({1: 0})),
+        (0x80, 0x60, 0x00, 0x00, cbor.encode({1: 2, 3: 1})),
+        (0x80, 0x60, 0x00, 0x00, cbor.encode({1: 0, 3: 1, 4: b"\x5a" * 8})),
+        (0x80, 0x61, 0x00, 0x00, cbor.encode({1: 2, 2: b"\x01"})),
+        (0x80, 0x61, 0x00, 0x00, cbor.encode({1: 3, 2: b"\x01"})),
+        (0x80, 0x62, 0x00, 0x00, cbor.encode({1: 0, 2: {1: "", 2: b"\x11" * 42, 3: b"u", 6: -7, 7: 1,
+                                                          8: b"\x00" * 32}})),
+        (0x80, 0x62, 0x00, 0x00, cbor.encode({1: 2, 2: {1: 1, 2: bytes(52), 3: bytes(8)}, 5: True,
+                                              6: b"\x02"})),
+        # tags: in a value, around the request, in a record's unknown field
+        (0x80, 0x60, 0x00, 0x00, cmap((E(1), tagged(0, E(0))), (E(3), tagged(11, E(0))))),
+        (0x80, 0x60, 0x00, 0x00, tagged(24, E({1: 0}))),
+        (0x80, 0x61, 0x00, 0x00, cmap((E(1), E(2)), (E(2), tagged(2, E(b"\x01"))))),
+        (0x80, 0x62, 0x00, 0x00, cmap((E(1), E(0)), (E(2), cmap((E(1), E("")), (E(2), E(b"\x11" * 42)), (E(3), E(b"u")),
+                                                                 (E(6), E(-7)), (E(7), E(1)), (E(8), E(bytes(32))),
+                                                                 (E(20), tagged(11, E(0))))))),
+        (0x80, 0x62, 0x00, 0x00, cmap((E(1), E(2)), (E(2), cmap((E(1), E(1)), (E(9), tagged(11, E(0))),
+                                                                 (E(2), E(bytes(52))), (E(3), E(bytes(8))))))),
     ]),
 }
-LFMGMT_SAFE_INS = {0x01, 0x02, 0x21, 0x22, 0x29, 0x2A}
+LFMGMT_SAFE_INS = {0x01, 0x02, 0x21, 0x22, 0x29, 0x2A, 0x60, 0x61, 0x62}
 
 
 def mutate(rng, cmd):
@@ -278,7 +315,6 @@ def test_fuzz_ctaphid_frames(target):
 
 def test_fuzz_ctap2_cbor(target):
     """Well-framed CTAPHID_CBOR messages with mutated CBOR payloads."""
-    from fido2 import cbor
     from fido2.hid import CTAPHID
     rng = random.Random("%d/cbor" % SEED)
     rp, user = {"id": "example.com", "name": "ex"}, {"id": b"\x01", "name": "a", "displayName": "A"}
@@ -304,6 +340,24 @@ def test_fuzz_ctap2_cbor(target):
         (0x41, {1: 4, 2: {1: b"\x00" * 32}}),
         (0x0B, None),
     )]
+    # tagged items and indefinite lengths (answered INVALID_CBOR): the shape
+    # the fuzzer first crashed with (an unknown hmac-secret member whose value
+    # is a tag), a tagged key, value, request, COSE key member, extension
+    mc = [(E(1), E(b"\x00" * 32)), (E(2), E(rp)), (E(3), E(user)), (E(4), E(params))]
+    seeds += [
+        b"\x02" + cmap((E(1), E("example.com")), (E(2), E(b"\x11" * 32)),
+                       (E(4), cmap((E("hmac-secret"), cmap((E(1), E({1: 2})), (E(2), E(bytes(32))),
+                                                           (E(13), tagged(11, E(0)))))))),
+        b"\x02" + cmap((tagged(1, E(1)), E("example.com")), (E(2), E(b"\x11" * 32))),
+        b"\x01" + cmap((E(1), tagged(2, E(b"\x00" * 32))), *mc[1:]),
+        b"\x01" + tagged(24, cmap(*mc)),
+        b"\x01" + cmap(*mc, (E(6), cmap((E("credProtect"), tagged(1, E(3))), (E("x"), tagged(11, E(0))))),
+                       (E(16), tagged(11, E(0)))),
+        b"\x06" + cmap((E(1), E(2)), (E(2), E(2)), (E(3), cmap((E(1), E(2)), (E(3), E(-25)), (E(-1), E(1)),
+                                                                (E(-2), E(bytes(32))), (E(-3), E(bytes(32))),
+                                                                (E(99), tagged(11, E(0)))))),
+        b"\x02\xbf" + E(1) + E("example.com") + E(2) + E(b"\x11" * 32) + b"\xff",
+    ]
     sent = []
     dev = ctaphid.open_device()
     for i in range(ITER):

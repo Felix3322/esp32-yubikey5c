@@ -70,7 +70,24 @@ this can brick the board: flashing and recovery through esptool keep
 working. Together with the bound root key this is protection level 2; level
 3 needs Secure Boot and flash encryption.
 
-## Management applet command
+## Management applet commands
+
+The management applet (AID `F0 4C 49 42 52 45 46 49 44 4F`, CLA 80, data
+and answers CBOR maps with integer keys) is what the tools talk to; the
+instructions are listed in `pico-keys-sdk/src/fs/lf_mgmt.h`. Provisioning and
+the single-key transfer of firmware 2.1.0:
+
+| INS | Command | Data | Needs | Answer |
+|---|---|---|---|---|
+| 01 | INFO | none | nothing | device, security and profile state; key 19 (2.1.0): `{1: export mask, 2: import mask}`, bit n for application n (0 FIDO, 1 OATH, 2 OTP, 3 OpenPGP, 4 PIV), absent before 2.1.0 |
+| 50 | PROVISION | none (P1 A5, P2 01 / 02) | normal boot, touch | below |
+| 60 | KEY_LIST | `{1: app, 2: FIDO PIN, 3: cursor, 4: list session ID}` | FIDO PIN when set; first page: a touch for FIDO without a verified PIN and for OATH with a password or OTP PIN; later pages: the list session ID (docs/KEY_TRANSFER.md) | `{1: entries, 2: exportable, 3: next cursor, 4: list session ID}` |
+| 61 | KEY_EXPORT | `{1: app, 2: key ID, 3: FIDO PIN, 4: application secret}` | export allowed by the profile and build, FIDO PIN when set, touch; OpenPGP: Admin PIN | `{1: app, 2: record}` |
+| 62 | KEY_IMPORT | `{1: app, 2: record, 3: FIDO PIN, 4: application secret, 5: replace, 6: target}` | FIDO PIN when set, touch; FIDO: not a secure profile or HARDENED build; OTP: the access code of a target slot that has one | `{1: app, 2: key ID}` |
+
+The fields, records and status words of INS 60–62 are in
+[KEY_TRANSFER.md](KEY_TRANSFER.md). Automatic presence never replaces the
+touch of any of these commands.
 
 `PROVISION`: CLA 80, INS 50, P1 A5, P2 01 (bind the root key) or 02 (lock
 debug), no data. Needs a normal boot (not safe mode) and a physical touch

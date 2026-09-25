@@ -14,17 +14,21 @@ import traceback
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QColorDialog, QComboBox, QFileDialog, QFormLayout,
-    QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
+    QAbstractItemView, QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
     QProgressBar, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit,
     QVBoxLayout, QWidget,
 )
 
 from smartcard.Exceptions import CardConnectionException
 
-from . import __version__, firmware, gui_policy, provision
+from . import __version__, firmware, gui_policy, keyio, provision, stdformats
 from .backup import BackupError, firmware_supports, read_file, write_file
-from .mgmt import Management, PinRequired, clip_name, display_name
+from .cli import (PGP_SLOTS, already_there, key_entry_text, list_all_keys, oath_keys_from_links, pgp_key_text,
+                  qr_links, read_key_source, write_key)
+from .keyfile import SUFFIX, SingleKey, read_key_file
+from .keyio import KeyTransferError
+from .mgmt import APPS, Management, PinRequired, clip_name, display_name
 from .pcsc import ApduError, list_devices
 
 # ----------------------------------------------------------------------------
@@ -90,6 +94,8 @@ ZH = {
     "Scrub now": "立即全盘校验",
     "Touch the key now (it blinks yellow)...": "请触摸按键（黄灯闪烁）…",
     "Working...": "处理中…",
+    "Busy with work in the background...": "正在后台处理…",
+    "If the key blinks, touch it to list the keys...": "如按键闪烁，请触摸以列出密钥…",
     "Done": "完成",
     "Error": "错误",
     "The device restarts...": "设备正在重启…",
@@ -101,6 +107,12 @@ ZH = {
     "Restore test passed: the backup can be restored.": "恢复测试通过：此备份可以被完整恢复。",
     "Restore test FAILED.": "恢复测试失败。",
     "Imported": "已导入",
+    "Imported: %d files": "已导入：%d 个文件",
+    "%s (%s, UUID %s, %d files)": "%s（%s，UUID %s，%d 个文件）",
+    # punctuation of composed texts (full-width in Chinese)
+    ":": "：",
+    "%s: %s": "%s：%s",
+    "revoked": "已吊销",
     "Type 'erase' to erase every profile and key:": "输入 erase 以清除所有环境和密钥：",
     "Profile name:": "环境名称：",
     "Healthy": "健康",
@@ -214,6 +226,142 @@ ZH.update({
     "Damaged system area copies": "损坏的系统区副本",
 })
 
+# The "Keys" tab (single keys, KeysTab below).
+KEY_APP_TITLES = {"fido": "FIDO2 passkeys", "oath": "OATH accounts", "otp": "OTP slots", "openpgp": "OpenPGP keys",
+                  "piv": "PIV keys"}
+PGP_SLOT_TITLES = dict(zip(PGP_SLOTS, ("signature", "decryption", "authentication")))
+ZH.update({
+    "Keys": "密钥",
+    "Key manager": "密钥管理",
+    "Application": "应用",
+    "All applications": "全部应用",
+    "FIDO2 passkeys": "FIDO2 通行密钥",
+    "OATH accounts": "OATH 账户",
+    "OTP slots": "OTP 槽位",
+    "OpenPGP keys": "OpenPGP 密钥",
+    "PIV keys": "PIV 密钥",
+    "Key": "密钥",
+    "Details": "详情",
+    "Export selected...": "导出所选…",
+    "Import file...": "从文件导入…",
+    "Import otpauth link...": "导入 otpauth 链接…",
+    "Import QR image...": "导入二维码图片…",
+    "keys-hint": "点击“刷新”列出当前环境的密钥（可能需要输入 FIDO PIN）。",
+    "Secret keys of this profile can be exported.": "此环境的私钥可以导出。",
+    "not-exportable": "此环境或固件构建不允许导出私钥（安全环境、禁止导出的环境或 HARDENED 构建）。",
+    "no-key-transfer": ("此设备的固件不能列出或导出单个密钥（需要 LibreFido 2.1.0 或更新版本）。"
+                        "OATH、OpenPGP 和 PIV 密钥仍可通过各自的应用导入。"),
+    "This firmware lists no keys of this application.": "此固件不能列出该应用的密钥。",
+    "Keys listed: %d": "已列出密钥：%d",
+    "fido-listed-without-pin": ("通行密钥是在未输入 FIDO PIN 的情况下列出的：需要用户验证的通行密钥只有输入 FIDO PIN "
+                                "后才会列出，用户名也只在那时显示。点击“用 FIDO PIN 列出…”输入 PIN（未设置 FIDO PIN "
+                                "的环境需先设置一个）。"),
+    "List with FIDO PIN...": "用 FIDO PIN 列出…",
+    "Enter the FIDO PIN.": "请输入 FIDO PIN。",
+    "key-manager-failed": "密钥管理无法启动（其他标签页不受影响）。详细信息：",
+    "The keys changed: Refresh lists them again.": "密钥已变更：点击“刷新”重新列出。",
+    "The device or profile changed: Refresh lists its keys.": "设备或环境已变更：点击“刷新”列出它的密钥。",
+    "Select a key first.": "请先选择一个密钥。",
+    "File format:": "文件格式：",
+    "LibreFido key file (.lfkey, encrypted)": "LibreFido 密钥文件（.lfkey，加密）",
+    "otpauth:// link (NOT encrypted)": "otpauth:// 链接（不加密）",
+    "PEM file (PKCS#8, encrypted)": "PEM 文件（PKCS#8，加密）",
+    "Key file passphrase": "密钥文件口令",
+    "Do not encrypt (anyone with the file has the key)": "不加密（拿到文件的人即拿到密钥）",
+    "The key will NOT be encrypted: anyone with the file has your key. Continue?":
+        "密钥将不加密：拿到此文件的人即拿到你的密钥。继续？",
+    "otpauth-plain": "otpauth:// 链接以明文保存密钥：拿到此文件的人即拿到你的密钥。继续？",
+    "OpenPGP Admin PIN": "OpenPGP 管理员 PIN",
+    "OpenPGP Admin PIN:": "OpenPGP 管理员 PIN（Admin PIN）：",
+    "The OpenPGP Admin PIN is needed.": "必须输入 OpenPGP 管理员 PIN。",
+    "OATH password": "OATH 密码",
+    "OATH password (leave empty if the OATH application has none):": "OATH 密码（如未设置请留空）：",
+    "OTP access code": "OTP 访问码",
+    "Access code of OTP slot %s (12 hex digits; leave empty if it has none):":
+        "OTP 槽位 %s 的访问码（12 位十六进制；如未设置请留空）：",
+    "PIV management key": "PIV 管理密钥",
+    "PIV management key (hex; leave empty for the default key):": "PIV 管理密钥（十六进制；留空则使用默认密钥）：",
+    "OTP slot:": "OTP 槽位：",
+    "PIV slot:": "PIV 槽位：",
+    "OpenPGP key slot:": "OpenPGP 密钥槽位：",
+    "signature": "签名",
+    "decryption": "解密",
+    "authentication": "认证",
+    "Key file written": "密钥文件已写入",
+    "NOT encrypted: anyone with this file has the key.": "未加密：拿到此文件的人即拿到该密钥。",
+    "Add this passkey to the device?": "把此通行密钥添加到设备？",
+    "Add this key to the device?": "把此密钥添加到设备？",
+    "Add %d OATH accounts to the device?": "把 %d 个 OATH 账户添加到设备？",
+    "fido-counter-export": ("签名计数器：该通行密钥仍保留在本设备上。会校验签名计数器的网站可能把在两个设备上使用的"
+                            "通行密钥视为克隆并停用它：请只在一个设备上使用它。"),
+    "fido-counter-import": ("签名计数器：导入的通行密钥从导出时源设备的计数值继续。如果源设备也继续使用它，"
+                            "会校验签名计数器的网站可能把它视为克隆并停用：请只在一个设备上使用它。"),
+    "Replace what is on the device?": "替换设备上已有的内容？",
+    "What is there now is erased for good.": "现有内容将被永久清除。",
+    "Not imported": "未导入",
+    "otpauth:// or otpauth-migration:// link:": "otpauth:// 或 otpauth-migration:// 链接：",
+    "left-out": "设备无法保存的账户已略过：%s",
+    "missing-qr": "此 Google 身份验证器导出分为多个二维码，这里缺少第 %s 个：请把它们也导入。",
+    "others-qr": "%d 个不含 otpauth 链接的二维码已略过。",
+    "Choose the key": "选择密钥",
+    "Key of the file:": "文件中的密钥：",
+    "Password of %s:": "%s 的密码：",
+    "Passphrase of the OpenPGP key:": "OpenPGP 密钥的口令：",
+    "key-file-plain": "此密钥文件未加密，无法证明它没有被能写入该文件的人替换。仍然导入？",
+    "unknown-source": "无法识别此文件：不是 LibreFido 密钥文件、PEM/DER/PKCS#12 密钥、OpenPGP 密钥、otpauth 链接或二维码图片。",
+    "No key of this file can go onto the device.": "此文件中没有可以存入设备的密钥。",
+    "Images": "图片",
+    "Key files": "密钥文件",
+    "All files": "所有文件",
+    # words of the key list (cli.key_entry_text), and the joiner of its details
+    ", ": "，",
+    "user %s": "用户 %s",
+    "imported": "导入的",
+    "%d digits": "%d 位",
+    "touch": "需按键",
+    "slot %s": "槽位 %s",
+    "access code": "有访问码",
+    "fingerprint %s": "指纹 %s",
+    "created %s": "创建于 %s",
+    "signature key": "签名密钥",
+    "decryption key": "解密密钥",
+    "authentication key": "认证密钥",
+    "PIN policy %s": "PIN 策略：%s",
+    "touch policy %s": "按键策略：%s",
+    "default": "默认",
+    "never": "从不",
+    "once": "一次",
+    "always": "总是",
+    "cached": "缓存",
+    "malformed entry": "条目格式错误",
+})
+EN.update({
+    "keys-hint": "Refresh lists the keys of the active profile (the FIDO PIN may be asked for).",
+    "fido-listed-without-pin": "Passkeys listed without the FIDO PIN: passkeys that need user verification are only "
+                               "listed with the FIDO PIN, and user names only then. \"List with FIDO PIN...\" asks "
+                               "for it (a profile without a FIDO PIN lists them once one is set).",
+    "key-manager-failed": "The Key manager could not be started (the other tabs work as usual). Details:",
+    "not-exportable": "This profile or build does not let secret keys out (a secure or no-export profile, or a "
+                      "HARDENED build).",
+    "no-key-transfer": "The firmware of this device cannot list or export single keys (LibreFido 2.1.0 or newer). "
+                       "OATH, OpenPGP and PIV keys can still be added through their own applications.",
+    "otpauth-plain": "An otpauth:// link holds the secret in the clear: anyone with the file has your key. Continue?",
+    "fido-counter-export": "Sign counter: the passkey stays on this key as well. A site that checks signature "
+                           "counters may take a passkey used on two keys for a clone and block it: use it on one "
+                           "key only.",
+    "fido-counter-import": "Sign counter: the passkey goes on from the counter of the key it was exported from, as "
+                           "it was at the export. If that key keeps using it, a site that checks signature counters "
+                           "may take it for a clone and block it: use it on one key only.",
+    "left-out": "Left out (the device cannot hold them): %s",
+    "missing-qr": "This Google Authenticator export is split over several QR codes; number(s) %s are not here: "
+                  "add them too.",
+    "others-qr": "%d QR code(s) without an otpauth link left out.",
+    "key-file-plain": "This key file is NOT encrypted, so nothing proves it was not replaced by someone who could "
+                      "write the file. Import it anyway?",
+    "unknown-source": "Unknown file: not a LibreFido key file, a PEM, DER or PKCS#12 key, an OpenPGP key, otpauth "
+                      "links or a QR code image.",
+})
+
 
 # ----------------------------------------------------------------------------
 # Worker
@@ -240,7 +388,7 @@ class Job(QRunnable):
         try:
             self.signals.done.emit(fn(lambda a, b: self.signals.progress.emit(a, b)))
         except (ApduError, BackupError, RuntimeError, OSError, CardConnectionException,
-                provision.ProvisionError) as e:
+                provision.ProvisionError, KeyTransferError, stdformats.FormatError) as e:
             self.signals.failed.emit((e, str(e)))
         except Exception as e:
             self.signals.failed.emit((e, traceback.format_exc()))
@@ -258,6 +406,27 @@ def _plain(text):
     return text
 
 
+class UnavailableTab(QWidget):
+    """A tab that could not be built: what went wrong (text) and its details
+    (a traceback), as plain text. show_info() does nothing."""
+
+    def __init__(self, text, details=""):
+        super().__init__()
+        lay = QVBoxLayout(self)
+        self.state = QLabel(text)
+        self.state.setTextFormat(Qt.TextFormat.PlainText)
+        self.state.setWordWrap(True)
+        self.state.setStyleSheet("color:#a00;")
+        lay.addWidget(self.state)
+        self.details = QTextEdit()
+        self.details.setReadOnly(True)
+        self.details.setPlainText(details)
+        lay.addWidget(self.details, 1)
+
+    def show_info(self, info):
+        pass
+
+
 # ----------------------------------------------------------------------------
 # Main window
 # ----------------------------------------------------------------------------
@@ -271,6 +440,7 @@ class MainWindow(QMainWindow):
         self.mgmt = None
         self.info = None
         self.busy = False
+        self._quiet = False                     # the operation running is quiet (see _run)
         self._job = None
         self._then = self._on_error = None
         self._refresh_after = False
@@ -296,6 +466,10 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._device_tab(), T("Device"))
         self.tabs.addTab(self._profiles_tab(), T("Profiles"))
+        self.keys_tab = KeysTab(self)
+        self.tabs.addTab(self.keys_tab, T("Keys"))
+        self.manager_tab = self._key_manager_tab()
+        self.tabs.addTab(self.manager_tab, T("Key manager"))
         self.tabs.addTab(self._backup_tab(), T("Backup"))
         self.security_tab = gui_policy.SecurityTab(self, T)
         self.tabs.addTab(self.security_tab, T("Security"))
@@ -311,6 +485,16 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     # -- tabs ----------------------------------------------------------------
+    def _key_manager_tab(self):
+        """The Key manager tab (gui_manager and its five pages). When
+        importing or building it fails, the rest of the window still starts
+        and the tab shows why."""
+        try:
+            from .gui_manager import KeyManagerTab
+            return KeyManagerTab(self, T)
+        except Exception:
+            return UnavailableTab(T("key-manager-failed"), traceback.format_exc())
+
     def _device_tab(self):
         w = QWidget()
         lay = QVBoxLayout(w)
@@ -323,7 +507,7 @@ class MainWindow(QMainWindow):
             lbl.setTextFormat(Qt.TextFormat.PlainText)         # device text, never rich text
             lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             self.dev_labels[key] = lbl
-            form.addRow(T(title) + ":", lbl)
+            form.addRow(T(title) + T(":"), lbl)
         lay.addLayout(form)
         sec = QGroupBox(T("Chip security"))
         sform = QFormLayout(sec)
@@ -333,7 +517,7 @@ class MainWindow(QMainWindow):
             lbl = QLabel("-")
             lbl.setTextFormat(Qt.TextFormat.PlainText)
             self.sec_labels[key] = lbl
-            sform.addRow(T(title) + ":", lbl)
+            sform.addRow(T(title) + T(":"), lbl)
         lay.addWidget(sec)
         fwg = QGroupBox(T("Firmware update"))
         fwl = QVBoxLayout(fwg)
@@ -411,9 +595,9 @@ class MainWindow(QMainWindow):
         self.pin_edit = QLineEdit()
         self.pin_edit.setEchoMode(QLineEdit.EchoMode.Password)
         f.addRow(self.enc_check)
-        f.addRow(T("Passphrase") + ":", self.pass1)
-        f.addRow(T("Repeat passphrase") + ":", self.pass2)
-        f.addRow(T("FIDO PIN of the profile (if set)") + ":", self.pin_edit)
+        f.addRow(T("Passphrase") + T(":"), self.pass1)
+        f.addRow(T("Repeat passphrase") + T(":"), self.pass2)
+        f.addRow(T("FIDO PIN of the profile (if set)") + T(":"), self.pin_edit)
         b = QPushButton(T("Export to file..."))
         b.clicked.connect(self._export)
         f.addRow(b)
@@ -469,20 +653,30 @@ class MainWindow(QMainWindow):
         return w
 
     # -- plumbing ------------------------------------------------------------
-    def _run(self, fn, then=None, touch=False, reboots=False, refresh=False, on_error=None, device=True):
+    def _run(self, fn, then=None, touch=False, reboots=False, refresh=False, on_error=None, device=True, banner=None,
+             quiet=False):
         """Runs fn(progress) in a worker thread. Afterwards, on the GUI
         thread: then(result), or on_error(exception), which returns True when
         it handled the failure (otherwise the error is shown). device=False
-        for work without a device (backup files). Returns whether it started."""
+        for work without a device (backup files). banner: the text shown
+        meanwhile instead of the touch or "working" one. quiet: background
+        work the user did not ask for (the OATH page's code refresh): no
+        banner and no progress bar, which would flash every time; errors are
+        reported as always. Returns whether it started (not while another
+        operation runs: see _turned_away)."""
         if self.busy:
+            if not quiet:
+                self._turned_away()
             return False
         if device and self.mgmt is None:
             QMessageBox.warning(self, T("Error"), T("No device"))
             return False
-        self.busy = True
-        self.banner.setText(T("Touch the key now (it blinks yellow)...") if touch else T("Working..."))
-        self.banner.setVisible(True)
-        self.progress.setVisible(False)
+        self.busy, self._quiet = True, quiet
+        if not quiet:
+            self.banner.setText(banner or (T("Touch the key now (it blinks yellow)...") if touch else
+                                           T("Working...")))
+            self.banner.setVisible(True)
+            self.progress.setVisible(False)
 
         def work(progress):
             r = fn(progress)
@@ -491,7 +685,8 @@ class MainWindow(QMainWindow):
             return r
         job = Job(work)
         job.setAutoDelete(False)
-        job.signals.progress.connect(self._on_progress)
+        if not quiet:
+            job.signals.progress.connect(self._on_progress)
         # The callbacks are kept here and dropped once used, not in the Job's
         # signal connections, which live as long as the Job: they may hold
         # what the operation needs (a passphrase for a retry, for example).
@@ -511,7 +706,7 @@ class MainWindow(QMainWindow):
     def _finished(self, result):
         then, refresh = self._then, self._refresh_after
         self._then = self._on_error = None
-        self.busy = False
+        self.busy = self._quiet = False
         self.banner.setVisible(False)
         self.progress.setVisible(False)
         if then:
@@ -523,19 +718,20 @@ class MainWindow(QMainWindow):
         exc, msg = failure
         on_error = self._on_error
         self._then = self._on_error = None
-        self.busy = False
+        self.busy = self._quiet = False
         self.banner.setVisible(False)
         self.progress.setVisible(False)
         if not (on_error and on_error(exc)):
             QMessageBox.critical(self, T("Error"), _plain(msg))
         self.refresh()                          # (does nothing while a retry runs)
 
-    def _run_pin(self, op, typed, no_pin=False, then=None, refresh=False):
+    def _run_pin(self, op, typed, no_pin=False, then=None, refresh=False, touch=True, banner=None):
         """Runs op(pin, no_pin, progress), an operation that takes the FIDO
         PIN of the active profile, with the PIN typed in a field. When it
         turns out that a PIN is needed and none was typed (checked in the
         worker: the check waits for the device), the PIN is asked for and op
-        runs once more."""
+        runs once more. touch: the device waits for one (the banner).
+        banner(pin): the banner text instead, for the PIN op runs with."""
         def on_error(e):
             if typed or not isinstance(e, PinRequired) or not e.ask:
                 return False
@@ -552,12 +748,15 @@ class MainWindow(QMainWindow):
             if not pin and e.kind != "unknown":
                 QMessageBox.warning(self, T("Error"), T("The active profile has a FIDO PIN: it is needed."))
                 return True
-            self._run(lambda p: op(pin or None, not pin, p), then=then, touch=True, refresh=refresh)
+            self._run(lambda p: op(pin or None, not pin, p), then=then, touch=touch, refresh=refresh,
+                      banner=banner and banner(pin or None))
             return True
-        self._run(lambda p: op(typed or None, no_pin, p), then=then, touch=True, refresh=refresh, on_error=on_error)
+        self._run(lambda p: op(typed or None, no_pin, p), then=then, touch=touch, refresh=refresh, on_error=on_error,
+                  banner=banner and banner(typed or None))
 
     def refresh(self):
         if self.busy:
+            self._turned_away()
             return
         try:
             devices = list_devices()
@@ -572,6 +771,8 @@ class MainWindow(QMainWindow):
         if not devices:
             self.mgmt = None
             self.statusBar().showMessage(T("No device"))
+            self.keys_tab.show_info(None)
+            self.manager_tab.show_info(None)
             return
         try:
             if self.mgmt is None or self.mgmt.card.reader != self.reader_box.currentText():
@@ -583,6 +784,8 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.mgmt = None
             self.statusBar().showMessage(str(e))
+            self.keys_tab.show_info(None)
+            self.manager_tab.show_info(None)
             return
         self._show_info(self.info)
 
@@ -620,6 +823,8 @@ class MainWindow(QMainWindow):
             self.fw_state.setText(text)
             self.fw_state.setStyleSheet("color:#b70;" if fw["unconfirmed"] else "")
         self.security_tab.show_info(info)
+        self.keys_tab.show_info(info)
+        self.manager_tab.show_info(info)
 
     def _show_health(self, h):
         for i, (key, title) in enumerate(HEALTH_LABELS.items()):
@@ -641,11 +846,22 @@ class MainWindow(QMainWindow):
     def _ready(self):
         """No operation running and a device connected (says so otherwise)."""
         if self.busy:
+            self._turned_away()
             return False
         if self.mgmt is None:
             QMessageBox.warning(self, T("Error"), T("No device"))
             return False
         return True
+
+    def _turned_away(self):
+        """What the user asked for cannot start now: another operation runs.
+        Its banner says so; a quiet one (see _run) has none, so one is shown
+        now, or the click would do nothing without a word (or wait for it
+        without one: the OATH page starts the user's operation once its own
+        recalculation ended). It goes when the operation ends."""
+        if self.busy and self._quiet:
+            self.banner.setText(T("Busy with work in the background..."))
+            self.banner.setVisible(True)
 
     def _change_touch(self):
         """Whether a name, colour, button slot or board change needs a touch:
@@ -679,7 +895,10 @@ class MainWindow(QMainWindow):
 
     def _update_firmware(self):
         typed_pin, no_pin = self._update_pin()
-        if self.mgmt is None or not self.info or self.busy:
+        if self.busy:
+            self._turned_away()
+            return
+        if self.mgmt is None or not self.info:
             return
         path, _ = QFileDialog.getOpenFileName(self, T("Firmware image"), "", "Firmware (*.bin);;*")
         if not path:
@@ -821,7 +1040,7 @@ class MainWindow(QMainWindow):
 
         def done(r):                            # (holds no secret: it lives as long as the Job)
             p, notes = r
-            msg = T("Backup file written") + ":\n" + p
+            msg = T("Backup file written") + T(":") + "\n" + p
             if not encrypted:
                 msg += "\n\n" + T("NOT encrypted: anyone with this file has your keys.")
             for n in notes:
@@ -846,7 +1065,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, T("Error"), _plain(str(e)))
             return False
         if head["encrypted"]:
-            pw, ok = QInputDialog.getText(self, T("Passphrase"), T("Passphrase") + ":", QLineEdit.EchoMode.Password)
+            pw, ok = QInputDialog.getText(self, T("Passphrase"), T("Passphrase") + T(":"), QLineEdit.EchoMode.Password)
             if not ok:
                 return False
             work = lambda p: read_file(blob, pw, require_encryption=True)   # noqa: E731
@@ -858,6 +1077,7 @@ class MainWindow(QMainWindow):
         # Forget the previous backup first: a file that fails to load (or a
         # cancelled dialog) must not leave it in place for the device checks.
         if self.busy:
+            self._turned_away()
             return
         self.loaded_path = None
         self.verify_out.clear()
@@ -878,7 +1098,7 @@ class MainWindow(QMainWindow):
         if not info["encrypted"]:
             notes.append(T("NOT encrypted: nothing proves this file was not modified."))
         lines = [title, path] + notes + [
-                 "", "UUID: %s" % h["uuid"], "%s: %s" % (T("Name"), display_name(h["name"])),
+                 "", "UUID: %s" % h["uuid"], T("%s: %s") % (T("Name"), display_name(h["name"])),
                  "Serial: %s" % h["serial"], "Firmware: %s (min %s)" % (h["firmware"], h["min_firmware"]),
                  "Encrypted: %s" % info["encrypted"], "Root key: %s" % s["root_key"],
                  "Files: %d" % s["files"], "FIDO resident credentials: %d" % s["resident_credentials"],
@@ -935,8 +1155,8 @@ class MainWindow(QMainWindow):
         h = info["summary"]["header"]
         if self._cannot_import(h):
             return
-        backup = "%s (%s, UUID %s, %d files)" % (display_name(os.path.basename(path)), display_name(h["name"]) or "-",
-                                                 h["uuid"], info["summary"]["files"])
+        backup = T("%s (%s, UUID %s, %d files)") % (display_name(os.path.basename(path)),
+                                                    display_name(h["name"]) or "-", h["uuid"], info["summary"]["files"])
         target = self.target_spin.value() - 1
         prof = self._profile(target)
         # The first line is fixed text: Qt then shows the names as plain text.
@@ -952,8 +1172,528 @@ class MainWindow(QMainWindow):
         self._run_pin(lambda pin, no_pin, p: self.mgmt.import_profile(stream, target, progress=p, pin=pin,
                                                                       no_pin=no_pin),
                       None, False,
-                      then=lambda r: QMessageBox.information(self, T("Done"), T("Imported") + ": %d files" % r["files"]),
+                      then=lambda r: QMessageBox.information(self, T("Done"), T("Imported: %d files") % r["files"]),
                       refresh=True)
+
+
+# ----------------------------------------------------------------------------
+# Keys tab: single keys (docs/KEY_TRANSFER.md)
+# ----------------------------------------------------------------------------
+
+def _key_file_name(app, name):
+    """Suggested file name (without suffix) for a key named name."""
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:40].strip("._")
+    return "%s-%s" % (app, safe or "key")
+
+
+class KeyPassphraseDialog(QDialog):
+    """Passphrase for a key file to write: encrypted by default; the key in
+    the clear needs the box ticked and a second confirmation."""
+
+    def __init__(self, parent, T):
+        super().__init__(parent)
+        self.T = T
+        self.ok = False
+        self.passphrase = None
+        self.setWindowTitle(T("Key file passphrase"))
+        form = QFormLayout(self)
+        self.pass1 = QLineEdit()
+        self.pass2 = QLineEdit()
+        for field in (self.pass1, self.pass2):
+            field.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow(T("Passphrase") + T(":"), self.pass1)
+        form.addRow(T("Repeat passphrase") + T(":"), self.pass2)
+        self.plain = QCheckBox(T("Do not encrypt (anyone with the file has the key)"))
+        self.plain.toggled.connect(self._plain_toggled)
+        form.addRow(self.plain)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def _plain_toggled(self, on):
+        for field in (self.pass1, self.pass2):
+            field.setEnabled(not on)
+            if on:
+                field.clear()
+
+    def _accept(self):
+        T = self.T
+        p1, p2 = self.pass1.text(), self.pass2.text()
+        self.pass1.clear()
+        self.pass2.clear()
+        if self.plain.isChecked():
+            yes, no = QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No
+            if QMessageBox.question(self, T("Key file passphrase"),
+                                    T("The key will NOT be encrypted: anyone with the file has your key. Continue?"),
+                                    yes | no, no) != yes:
+                return
+            self.passphrase = None
+        elif p1 != p2 or not p1:
+            QMessageBox.warning(self, T("Error"), T("Passphrases differ") if p1 != p2 else T("Enter a passphrase"))
+            return
+        else:
+            self.passphrase = p1
+        self.ok = True
+        self.accept()
+
+    @classmethod
+    def get(cls, parent, T):
+        """(True, passphrase), passphrase None for a key in the clear
+        (confirmed twice), or (False, None) when cancelled."""
+        dlg = cls(parent, T)
+        try:
+            dlg.exec()
+            return (True, dlg.passphrase) if dlg.ok else (False, None)
+        finally:
+            dlg.passphrase = None
+            dlg.deleteLater()
+
+
+class KeysTab(QWidget):
+    """'Keys' tab: the single keys of the active profile (docs/KEY_TRANSFER.md):
+    list them, export one to a file, add one from a file, an otpauth:// link
+    or a QR code image. Device work, key files that take a while to decrypt
+    and QR codes run in the main window's worker (MainWindow._run / _run_pin).
+    A key and the secrets typed for it live only as long as one operation;
+    the list holds no secrets."""
+
+    def __init__(self, window):
+        super().__init__()
+        self.w = window
+        self.rows = []                  # (application, KEY_LIST entry) of each table row
+        self.exportable = None
+        self.listed_for = None          # the device and profile the list is of (_identity)
+        lay = QVBoxLayout(self)
+        top = QHBoxLayout()
+        top.addWidget(QLabel(T("Application") + T(":")))
+        self.app_box = QComboBox()
+        self.app_box.addItem(T("All applications"), None)
+        for app in APPS:
+            self.app_box.addItem(T(KEY_APP_TITLES[app]), app)
+        top.addWidget(self.app_box, 1)
+        self.refresh_btn = QPushButton(T("Refresh"))
+        self.refresh_btn.clicked.connect(lambda: self.refresh_keys())
+        top.addWidget(self.refresh_btn)
+        # shown after a FIDO listing without the PIN, which leaves passkeys out
+        self.pin_btn = QPushButton(T("List with FIDO PIN..."))
+        self.pin_btn.clicked.connect(self.refresh_with_pin)
+        self.pin_btn.setVisible(False)
+        top.addWidget(self.pin_btn)
+        lay.addLayout(top)
+        self.state = QLabel(T("keys-hint"))
+        self.state.setTextFormat(Qt.TextFormat.PlainText)
+        self.state.setWordWrap(True)
+        lay.addWidget(self.state)
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels([T("Application"), T("Key"), T("Details")])
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        lay.addWidget(self.table, 1)
+        row = QHBoxLayout()
+        for text, slot in ((T("Export selected..."), self.export_selected), (T("Import file..."), self.import_file),
+                           (T("Import otpauth link..."), self.import_link),
+                           (T("Import QR image..."), self.import_qr)):
+            b = QPushButton(text)
+            b.clicked.connect(slot)
+            row.addWidget(b)
+        lay.addLayout(row)
+
+    # -- list ------------------------------------------------------------------
+    def _identity(self):
+        info = self.w.info or {}
+        return self.w.reader_box.currentText(), info.get("chip_serial"), info.get("serial"), info.get("active")
+
+    def _clear(self, text):
+        self.rows, self.exportable, self.listed_for = [], None, None
+        self.table.setRowCount(0)
+        self.state.setText(text)
+        self.pin_btn.setVisible(False)
+
+    def show_info(self, info):
+        """After the main window refreshed: the list of another device or
+        profile (or of none) is dropped."""
+        if self.listed_for is not None and (info is None or self._identity() != self.listed_for):
+            self._clear(T("keys-hint"))
+
+    def refresh_keys(self, pin=None):
+        """Lists the keys (in the worker). pin: the FIDO PIN to list with;
+        without one it is asked for when the profile has one, and a profile
+        without one lists FIDO without it (credProtect 1 passkeys only,
+        without user names: the state says so, and pin_btn lists again with
+        a PIN)."""
+        w = self.w
+        if not w._ready():
+            return
+        only = self.app_box.currentData()
+        identity = self._identity()
+
+        def listing(pin, no_pin, progress):
+            support = w.mgmt.key_transfer()["export"]
+            apps = [a for a in APPS if a in support and only in (None, a)]
+            return (support,) + list_all_keys(w.mgmt, apps, pin, no_pin) + (bool(pin),)
+
+        def banner(pin):
+            # The device never lists more than the application gives out
+            # without its secret: FIDO without the PIN, OATH with a password.
+            touch = any(w.mgmt.list_needs_touch(a, pin) for a in APPS if only in (None, a))
+            return T("If the key blinks, touch it to list the keys...") if touch else None
+        w._run_pin(listing, pin, False, then=lambda r: self._show(identity, *r), touch=False, banner=banner)
+
+    def refresh_with_pin(self):
+        """Lists again with the FIDO PIN, asked for here: FIDO then lists the
+        passkeys that need user verification too, with user names."""
+        if not self.w._ready():
+            return
+        pin, ok = QInputDialog.getText(self, T("FIDO PIN"), T("FIDO PIN of the active profile:"),
+                                       QLineEdit.EchoMode.Password)
+        if not ok:
+            return
+        if not pin:
+            QMessageBox.warning(self, T("Error"), T("Enter the FIDO PIN."))
+            return
+        self.refresh_keys(pin)
+
+    def _show(self, identity, support, rows, exportable, listed, with_pin=False):
+        self.rows, self.exportable, self.listed_for = rows, exportable, identity
+        self.table.setRowCount(len(rows))
+        for r, (app, entry) in enumerate(rows):
+            name, details = key_entry_text(app, entry, T)
+            for c, text in enumerate((T(KEY_APP_TITLES[app]), name, details)):
+                self.table.setItem(r, c, QTableWidgetItem(text))
+        if not support:
+            state = T("no-key-transfer")
+        elif not listed:
+            state = T("This firmware lists no keys of this application.")
+        else:
+            state = T("Secret keys of this profile can be exported.") if exportable else T("not-exportable")
+        text = "%s %s" % (T("Keys listed: %d") % len(rows), state) if listed else state
+        # FIDO without a verified PIN lists the credProtect 1 passkeys only, without user names
+        without_pin = "fido" in listed and not with_pin
+        if without_pin:
+            text += "\n" + T("fido-listed-without-pin")
+        self.state.setText(text)
+        self.pin_btn.setVisible(without_pin)
+
+    def _selected(self):
+        rows = self.table.selectionModel().selectedRows()
+        return self.rows[rows[0].row()] if rows and rows[0].row() < len(self.rows) else None
+
+    # -- export ----------------------------------------------------------------
+    def export_selected(self):
+        w = self.w
+        if not w._ready():
+            return
+        selected = self._selected()
+        if selected is None:
+            QMessageBox.warning(self, T("Export selected..."), T("Select a key first."))
+            return
+        if self.listed_for != self._identity():
+            self._clear(T("keys-hint"))
+            QMessageBox.warning(self, T("Export selected..."), T("The device or profile changed: Refresh lists its keys."))
+            return
+        if not self.exportable:
+            QMessageBox.warning(self, T("Export selected..."), T("not-exportable"))
+            return
+        app, entry = selected
+        key_id = entry.get(1)
+        if not isinstance(key_id, bytes) or not key_id:
+            QMessageBox.critical(self, T("Error"), T("malformed entry"))
+            return
+        yes, no = QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No
+        formats = [("lfkey", T("LibreFido key file (.lfkey, encrypted)"))]
+        if app == "oath":
+            formats.append(("otpauth", T("otpauth:// link (NOT encrypted)")))
+        if app == "piv":
+            formats.append(("pem", T("PEM file (PKCS#8, encrypted)")))
+        fmt = "lfkey"
+        if len(formats) > 1:
+            choice, ok = QInputDialog.getItem(self, T("Export selected..."), T("File format:"),
+                                              [text for _, text in formats], 0, False)
+            if not ok:
+                return
+            fmt = next((f for f, text in formats if text == choice), "lfkey")
+        if fmt == "otpauth":
+            if QMessageBox.question(self, T("Export selected..."), T("otpauth-plain"), yes | no, no) != yes:
+                return
+            passphrase = None
+        else:
+            ok, passphrase = KeyPassphraseDialog.get(self, T)
+            if not ok:
+                return
+        admin = None
+        if app == "openpgp":
+            admin, ok = QInputDialog.getText(self, T("OpenPGP Admin PIN"), T("OpenPGP Admin PIN:"),
+                                             QLineEdit.EchoMode.Password)
+            if not ok:
+                return
+            if not admin:
+                QMessageBox.warning(self, T("Error"), T("The OpenPGP Admin PIN is needed."))
+                return
+        suffix = {"lfkey": SUFFIX, "pem": ".pem", "otpauth": ".txt"}[fmt]
+        path, _ = QFileDialog.getSaveFileName(self, T("Export selected..."),
+                                              _key_file_name(app, key_entry_text(app, entry)[0]) + suffix,
+                                              "%s (*%s)" % (T("Key files"), suffix))
+        if not path:
+            return
+        encrypted = passphrase is not None
+
+        def export(pin, no_pin, progress):
+            key = keyio.export_single(w.mgmt, app, key_id, pin=pin, no_pin=no_pin, secret=admin)
+            notes = []
+            write_key(path, key, fmt, passphrase, warn=notes.append)
+            return path, keyio.describe(key), notes
+
+        def done(r):                            # (holds no secret: it lives as long as the Job)
+            written, what, notes = r
+            msg = T("Key file written") + T(":") + "\n" + written + "\n\n" + what
+            if not encrypted:
+                msg += "\n\n" + T("NOT encrypted: anyone with this file has the key.")
+            if app == "fido":
+                msg += "\n\n" + T("fido-counter-export")
+            for n in notes:
+                msg += "\n\n" + n
+            QMessageBox.information(self, T("Done"), _plain(msg))
+        w._run_pin(export, None, False, then=done)
+
+    # -- import ----------------------------------------------------------------
+    def import_file(self):
+        if not self.w._ready():
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, T("Import file..."), "",
+            "%s (*%s *.pem *.der *.key *.p12 *.pfx *.asc *.gpg *.pgp *.txt *.png *.jpg *.jpeg *.gif *.webp);;%s (*)"
+            % (T("Key files"), SUFFIX, T("All files")))
+        if not path:
+            return
+        try:
+            data, kind = read_key_source(path)
+        except (OSError, stdformats.FormatError) as e:
+            QMessageBox.critical(self, T("Error"), _plain(str(e)))
+            return
+        if kind == "lfkey":
+            self._open_key_file(data)
+        elif kind == "links":
+            self._import_links(data.decode("utf-8", "replace").splitlines())
+        elif kind == "image":
+            self._decode_qr(path)
+        elif kind == "piv":
+            self._open_piv(path, data)
+        elif kind == "openpgp":
+            self._open_pgp(path, data)
+        else:
+            QMessageBox.critical(self, T("Error"), T("unknown-source"))
+
+    def import_link(self):
+        if not self.w._ready():
+            return
+        text, ok = QInputDialog.getText(self, T("Import otpauth link..."), T("otpauth:// or otpauth-migration:// link:"),
+                                        QLineEdit.EchoMode.Password)       # the link holds the secret
+        if ok and text.strip():
+            self._import_links([text])
+
+    def import_qr(self):
+        if not self.w._ready():
+            return
+        path, _ = QFileDialog.getOpenFileName(self, T("Import QR image..."), "",
+                                              "%s (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;%s (*)"
+                                              % (T("Images"), T("All files")))
+        if path:
+            self._decode_qr(path)
+
+    def _decode_qr(self, path):
+        self.w._run(lambda p: qr_links(path), then=lambda r: self._import_links(*r), device=False)
+
+    def _import_links(self, texts, others=0):
+        try:
+            keys, left_out, missing = oath_keys_from_links(texts)
+        except stdformats.FormatError as e:
+            QMessageBox.critical(self, T("Error"), _plain(str(e)))
+            return
+        notes = [T("left-out") % why for why in left_out]
+        notes += [T("missing-qr") % ", ".join(map(str, numbers)) for numbers in missing.values()]
+        if others:
+            notes.append(T("others-qr") % others)
+        self._confirm_import(keys, notes)
+
+    def _open_key_file(self, data):
+        try:
+            info, _ = read_key_file(data)
+        except BackupError as e:
+            QMessageBox.critical(self, T("Error"), _plain(str(e)))
+            return
+        if info["encrypted"]:
+            pw, ok = QInputDialog.getText(self, T("Passphrase"), T("Passphrase") + T(":"), QLineEdit.EchoMode.Password)
+            if not ok:
+                return
+            work = lambda p: read_key_file(data, pw, require_encryption=True)[1]     # noqa: E731 (scrypt: a while)
+        else:
+            yes, no = QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No
+            if QMessageBox.warning(self, T("Import file..."), T("key-file-plain"), yes | no, no) != yes:
+                return
+            work = lambda p: read_key_file(data)[1]                                 # noqa: E731
+        self.w._run(work, then=lambda key: self._confirm_import([key]), device=False)
+
+    def _ask_file_password(self, label, retry):
+        """on_error of reading a protected key file: asks for its password
+        (label) and calls retry(password)."""
+        def on_error(e):
+            if not isinstance(e, stdformats.PassphraseRequired):
+                return False
+            pw, ok = QInputDialog.getText(self, T("Import file..."), label, QLineEdit.EchoMode.Password)
+            if ok:
+                retry(pw)
+            return True
+        return on_error
+
+    def _open_piv(self, path, data, password=None):
+        self.w._run(lambda p: stdformats.load_piv_key(data, password), then=self._piv_loaded,
+                    on_error=self._ask_file_password(T("Password of %s:") % os.path.basename(path),
+                                                     lambda pw: self._open_piv(path, data, pw)), device=False)
+
+    def _piv_loaded(self, found):
+        record, cert = found[0]
+        if len(found) > 1:
+            items = ["%d: %s" % (i + 1, keyio.describe(SingleKey("piv", r))) for i, (r, _) in enumerate(found)]
+            choice, ok = QInputDialog.getItem(self, T("Choose the key"), T("Key of the file:"), items, 0, False)
+            if not ok:
+                return
+            record, cert = found[items.index(choice)]
+        if cert:
+            record[8] = cert
+        self._confirm_import([SingleKey("piv", record)])
+
+    def _open_pgp(self, path, data, passphrase=None):
+        self.w._run(lambda p: stdformats.parse_openpgp_secret(data, passphrase), then=self._pgp_loaded,
+                    on_error=self._ask_file_password(T("Passphrase of the OpenPGP key:"),
+                                                     lambda pw: self._open_pgp(path, data, pw)), device=False)
+
+    def _pgp_loaded(self, found):
+        usable = [k for k in found if k["record"] is not None and not k["revoked"]]
+        if not usable:
+            QMessageBox.critical(self, T("Error"), T("No key of this file can go onto the device.") + "\n\n" + "\n".join(
+                T("%s: %s") % (pgp_key_text(k), T("revoked") if k["revoked"] else k["unsupported"]) for k in found))
+            return
+        k = usable[0]
+        if len(usable) > 1:
+            items = ["%d: %s" % (i + 1, pgp_key_text(k)) for i, k in enumerate(usable)]
+            choice, ok = QInputDialog.getItem(self, T("Choose the key"), T("Key of the file:"), items, 0, False)
+            if not ok:
+                return
+            k = usable[items.index(choice)]
+        hint = next((s for s in PGP_SLOTS if s in k["usage"]), None)
+        self._confirm_import([SingleKey("openpgp", k["record"])], slot_hint=hint)
+
+    def _confirm_import(self, keys, notes=(), slot_hint=None):
+        """Shows what is added and asks for what the application needs
+        (slot, its secret), then adds keys (of one application) in the
+        worker."""
+        if not keys or not self.w._ready():
+            return
+        app = keys[0].app
+        what = "\n".join(keyio.describe(k) for k in keys)
+        if app == "fido":
+            question = T("Add this passkey to the device?") + "\n\n" + what + "\n\n" + T("fido-counter-import")
+        elif len(keys) > 1:
+            question = T("Add %d OATH accounts to the device?") % len(keys) + "\n\n" + what
+        else:
+            question = T("Add this key to the device?") + "\n\n" + what
+        for n in notes:
+            question += "\n\n" + n
+        yes, no = QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No
+        if QMessageBox.question(self, T("Keys"), question, yes | no, no) != yes:
+            return
+        opts = self._import_options(app, keys[0].record, slot_hint)
+        if opts is not None:
+            self._run_import(keys, opts, False)
+
+    def _import_options(self, app, record, slot_hint):
+        """keyio.import_single options of app: its slot and secret, asked
+        for; None when cancelled."""
+        password = QLineEdit.EchoMode.Password
+        if app == "otp":
+            slot, ok = QInputDialog.getItem(self, T("Keys"), T("OTP slot:"), ["1", "2"],
+                                            1 if record.get(1) == 2 else 0, False)
+            if not ok:
+                return None
+            code, ok = QInputDialog.getText(self, T("OTP access code"), T("Access code of OTP slot %s (12 hex digits; "
+                                                                          "leave empty if it has none):") % slot,
+                                            password)
+            return {"target": int(slot), "otp_access_code": code.strip() or None} if ok else None
+        if app == "oath":
+            pw, ok = QInputDialog.getText(self, T("OATH password"),
+                                          T("OATH password (leave empty if the OATH application has none):"), password)
+            return {"oath_password": pw or None} if ok else None
+        if app == "openpgp":
+            refs = list(PGP_SLOTS)
+            names = [T(PGP_SLOT_TITLES[r]) for r in refs]
+            current = record.get(1)
+            default = refs.index(slot_hint) if slot_hint in refs else current - 1 if current in (1, 2, 3) else 0
+            choice, ok = QInputDialog.getItem(self, T("Keys"), T("OpenPGP key slot:"), names, default, False)
+            if not ok:
+                return None
+            pin, ok = QInputDialog.getText(self, T("OpenPGP Admin PIN"), T("OpenPGP Admin PIN:"), password)
+            if not ok:
+                return None
+            if not pin:
+                QMessageBox.warning(self, T("Error"), T("The OpenPGP Admin PIN is needed."))
+                return None
+            return {"pgp_key_ref": refs[names.index(choice)], "pgp_admin_pin": pin}
+        if app == "piv":
+            slots = ["%02X" % s for s in keyio.PIV_SLOTS]
+            current = "%02X" % record[1] if type(record.get(1)) is int else None
+            choice, ok = QInputDialog.getItem(self, T("Keys"), T("PIV slot:"), slots,
+                                              slots.index(current) if current in slots else 0, False)
+            if not ok:
+                return None
+            key, ok = QInputDialog.getText(self, T("PIV management key"),
+                                           T("PIV management key (hex; leave empty for the default key):"), password)
+            return {"piv_slot": int(choice, 16), "piv_mgmt_key": key.strip() or None} if ok else None
+        return {}
+
+    def _run_import(self, keys, opts, replace):
+        w = self.w
+
+        def add(pin, no_pin, progress):
+            results = []
+            for key in keys:
+                try:
+                    text = keyio.import_single(w.mgmt, key, pin=pin, no_pin=no_pin, replace=replace, **opts)
+                    results.append((key, text, None))
+                except KeyTransferError as e:
+                    results.append((key, None, e))
+            return results
+        # FIDO and OTP go through the management applet: a touch and the FIDO PIN.
+        w._run_pin(add, None, False, then=lambda results: self._imported(results, opts),
+                   touch=keys[0].app in ("fido", "otp"))
+
+    def _imported(self, results, opts):
+        added = [text for _, text, e in results if e is None]
+        there = [(key, e) for key, _, e in results if e is not None and already_there(e)]
+        failed = [e for _, _, e in results if e is not None and not already_there(e)]
+        if added and self.listed_for is not None:
+            self._clear(T("The keys changed: Refresh lists them again."))
+        parts = []
+        if added:
+            parts.append(T("Imported") + T(":") + "\n" + "\n".join(added))
+        if failed:
+            parts.append(T("Not imported") + T(":") + "\n" + "\n".join(str(e) for e in failed))
+        if failed:
+            QMessageBox.critical(self, T("Error"), "\n\n".join(parts))
+        elif added:
+            QMessageBox.information(self, T("Done"), "\n\n".join(parts))
+        if there:
+            yes, no = QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No
+            question = T("Replace what is on the device?") + "\n\n" + "\n".join(str(e) for _, e in there) + \
+                "\n\n" + T("What is there now is erased for good.")
+            if QMessageBox.question(self, T("Keys"), question, yes | no, no) == yes:
+                self._run_import([key for key, _ in there], opts, True)
 
 
 def main():

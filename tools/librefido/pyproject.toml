@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "librefido-tools"
-version = "2.0.1"
-description = "Management, backup and GUI tools for LibreFido security keys"
+version = "2.1.0"
+description = "Management, backup, key transfer and GUI tools for LibreFido security keys"
 readme = "README.md"
 license = { text = "AGPL-3.0-only" }
 requires-python = ">=3.9"
@@ -18,6 +18,9 @@ dependencies = [
 [project.optional-dependencies]
 gui = ["PySide6>=6.5"]
 recovery = ["esptool>=4.7"]
+# QR code images of otpauth:// links (librefido.stdformats.decode_qr_image);
+# zxing-cpp or pyzbar, each with Pillow, work as well.
+qr = ["opencv-python-headless>=4.5"]
 
 [project.scripts]
 librefido = "librefido.cli:main"

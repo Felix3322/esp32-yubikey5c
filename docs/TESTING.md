@@ -56,7 +56,7 @@ and run separately on the default ports.
 | Directory | What |
 |---|---|
 | `pico-fido/tests/pico-fido` | upstream CTAP1/CTAP2 suite plus LibreFido additions (PIN/token rules, credMgmt, largeBlobs, config, vendor key protection, EdDSA, getInfo features) |
-| `tests/fido` | presence policy, secure profiles, held root key, upgrade from 2.0.0 (unconfirmed/confirmed/rollback), HARDENED legacy keys, EdDSA compatibility |
+| `tests/fido` | presence policy, secure profiles, held root key, upgrade from 2.0.0 (unconfirmed/confirmed/rollback), HARDENED legacy keys, EdDSA compatibility, non-canonical CBOR (tags, indefinite lengths, truncated or too deeply nested items) in CTAP2 (HID and CCID) and management requests |
 | `tests/libfido2` | libfido2 1.17 interop over TCP custom I/O (ES256 and EdDSA) |
 | `tests/transport` | CCID/HID response state per interface, GET RESPONSE, chaining, HID channels, races between interfaces |
 | `tests/oath` | YKOATH security (access code, touch, HOTP window), sessions per interface, OTP slots via yubikit, keyboard typing, sealed records, locked key store |
@@ -64,33 +64,49 @@ and run separately on the default ports.
 | `tests/piv` | access rules, YubiKey default policies, OpenSC / pkcs11-tool / yubico-piv-tool, yubikit incl. Ed25519/X25519, sealed keys, upgrade |
 | `tests/isolation` | application resets and separation, vendor and rescue commands |
 | `tests/profiles` | profiles, backups, clones, restore tests, firmware update and rollback, management protocol security, policies, provisioning, HARDENED, GUI (offscreen) |
+| `tests/keys` | single-key transfer ([KEY_TRANSFER.md](KEY_TRANSFER.md)) between emulated devices: KEY_LIST / KEY_EXPORT / KEY_IMPORT per application, records and their validation, paging, touch and PIN order, refusals of secure profiles and HARDENED builds, imported FIDO credentials in use (assertions, hmac-secret, largeBlobKey, credBlob, credential management, excludeList), the OATH / OpenPGP / PIV imports through their applications, the CLI end to end, going back to 2.0.1 (needs its build) |
 | `tests/storage` | power cut at every flash operation, damaged copies, parity repair, boot recovery, root key rules, legacy migration |
 | `tests/unit` | Reed-Solomon codec, flash record lists (real flash.c/low_flash_v2.c on a model store), Ed25519/X25519 (RFC 8032/7748 vectors, 1200-case differential test against `cryptography`) |
-| `tests/tools` | host tools offline: backup format, PC/SC transactions, management client against a simulated device, CLI, GUI |
+| `tests/tools` | host tools offline: backup format, key file format (`test_keyfile.py`), standard key formats (`test_stdformats.py`: otpauth, Google Authenticator export, QR codes, PEM / DER / PKCS#12, OpenPGP secret keys), PC/SC transactions, management client against a simulated device, CLI, GUI (incl. the key commands and the Keys tab) |
 | `tests/fuzz` | seeded mutation fuzzing of every applet, raw CTAPHID frames and CTAP2 CBOR; the emulator must survive (run it against the ASan build) |
 | `tests/bench` | latency benchmark (`bench.py`), emulator or a real device over PC/SC |
 
-## Results of this revision (emulator, 2026-09-24)
+## Results of this revision (2.1.0, emulator, 2026-09-24/25)
 
 | Group | Standard build | ASan + UBSan build |
 |---|---|---|
 | `pico-fido/tests/pico-fido` | 273 passed | 273 passed |
-| `tests/unit`, `tests/storage` | 106 passed, 1 skipped¹ | see below² |
-| `tests/profiles`, `tests/tools` | 223 passed, 1 skipped | see below² |
-| `tests/openpgp`, `tests/piv`, `tests/isolation` | 65 passed | 58 passed (openpgp, piv) |
-| `tests/oath`, `tests/transport`, `tests/fido`, `tests/libfido2` | 74 passed, 5 skipped¹ | 73 passed, 5 skipped¹ |
-| `tests/fuzz` (1500 / 3000 / 6000 iterations per target) | 9 passed | 9 passed, no sanitizer report |
-| fixed-port tests (earlier-firmware baselines, default ports) | 53 passed, 1 skipped | — |
+| `tests/unit`, `tests/storage` | 71 passed, 1 skipped¹; 35 more passed in a re-run³ | not run this time⁴ |
+| `tests/profiles`, `tests/tools` | 638 passed, 2 skipped; 3 more passed in a re-run³ | not run this time⁴ |
+| `tests/openpgp`, `tests/piv`, `tests/isolation` | 63 passed; 3 more passed in a re-run³ | 59 passed (openpgp, piv) |
+| `tests/oath`, `tests/transport` | 74 passed, 5 skipped¹ with `tests/fido`; 1 more passed in a re-run³ | 74 passed, 5 skipped¹ (with `tests/fido`) |
+| `tests/fido`, `tests/libfido2` (after the CBOR validation) | 94 passed, 5 skipped¹ | see above |
+| `tests/keys` | 21 passed | 21 passed, no sanitizer report |
+| `tests/manager` | 101 passed (with `tests/keys` before the CBOR validation) | — |
+| `tests/fuzz` (1500 iterations; ASan 3000) | 9 passed; CTAP2 CBOR seeds 3 and 5 with 6000 iterations passed | 9 passed, no sanitizer report |
+| HARDENED binary: `tests/fido/test_cbor_hardening.py`, `tests/keys/test_transfer_policy.py`, `tests/profiles/test_hardened.py` | 89 passed, 1 skipped | — |
+| fixed-port tests (earlier-firmware baselines, default ports) | 54 passed, 1 skipped | — |
 
 ¹ tests that need fixed ports; they pass in the fixed-port run.
-² `tests/storage`, `tests/profiles`, `tests/isolation` under ASan: the run of
-this revision collided with an orphaned emulator of another test slot (the
-slot runner now removes such orphans) and its re-run was interrupted; the
-previous revision's ASan run of these suites had no sanitizer report.
+³ the first run of these groups ran at the same time as two ESP32-S3 builds
+and seven groups shared six test slots: 21 storage tests failed on a busy
+test port and 14 more on timeouts, plus 7 timing-dependent tests in other
+groups. Re-run without that load, every one of them passed (storage 44,
+profiles 23, openpgp 5, oath 7).
+⁴ the storage / profiles / isolation groups take about 40 minutes under
+ASan; the previous revisions' ASan runs of them had no sanitizer report.
+
+The last change (CTAP2 CBOR validation, see below) was re-tested with the
+upstream suite, `tests/fido`, `tests/libfido2`, `tests/keys`, `tests/fuzz`
+and the HARDENED groups; the other groups ran on the tree just before it.
 
 Earlier findings of the fuzzer, fixed: a division by zero reachable without
-authentication in the secure-messaging path of OpenPGP/PIV, and a
-misaligned 32-bit read of U2F key handles (fatal on the ESP32-S3).
+authentication in the secure-messaging path of OpenPGP/PIV, a misaligned
+32-bit read of U2F key handles (fatal on the ESP32-S3), and a CBOR tag as
+the value of a member the parser skips (tinycbor counts no tag as an item,
+so the parser ran past the end of the map: an assertion, a reboot by any
+host; CTAP2 requests and the management applet's CBOR commands are now
+validated first, without tags or indefinite lengths).
 
 Yubico's CLI against the emulator: `ykman --reader "<reader>"` lists the
 applications, adds and calculates OATH TOTP/HOTP accounts (codes match RFC

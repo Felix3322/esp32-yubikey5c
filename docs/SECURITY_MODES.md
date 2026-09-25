@@ -44,17 +44,35 @@ A secure profile behaves like a YubiKey:
 
 - created empty on the device, never imported and never converted from a
   standard profile (its keys have never been outside);
-- nothing can be exported, not even with the PIN; the flag cannot be
-  cleared (to leave secure mode, wipe the profile);
+- nothing can be exported, not even with the PIN: no backup and no single
+  key ([KEY_TRANSFER.md](KEY_TRANSFER.md)); the flag cannot be cleared (to
+  leave secure mode, wipe the profile);
+- its FIDO credentials are always made on the device: a single FIDO
+  credential is not imported into it (`6986`). As on a YubiKey, OTP slots
+  can be programmed and OATH accounts, OpenPGP keys and PIV keys added
+  through their own applications (their own password, Admin PIN or
+  management key), also from key files and standard formats;
 - every presence request needs a physical press ("my device is safe" is
   not available);
 - its root key must be bound to the chip before it can be created.
 
 A HARDENED build treats every profile as secure for exports and presence
-(nothing can be exported, automatic presence is not available), but it can
-restore a backup made on a STANDARD device: that is the only way to bring
-existing credentials to it, and an import cannot take keys out. Only
-profiles *created* secure are never imported into.
+(nothing can be exported, neither a backup nor a single key; automatic
+presence is not available), but it can restore a backup made on a STANDARD
+device: that is the only way to bring existing FIDO credentials to it (a
+single FIDO credential is refused, as in a secure profile), and an import
+cannot take keys out. Only profiles *created* secure are never imported
+into.
+
+| | Standard profile | No-export profile | Secure profile | HARDENED build |
+|---|---|---|---|---|
+| Back up the profile | touch, FIDO PIN¹ | refused | refused | refused |
+| Export a single key | touch, FIDO PIN¹ (+ OpenPGP Admin PIN) | refused | refused | refused |
+| Import a single FIDO credential | touch, FIDO PIN¹ | touch, FIDO PIN¹ | refused | refused |
+| Import a single OTP slot | touch, FIDO PIN¹ | touch, FIDO PIN¹ | touch, FIDO PIN¹ | touch, FIDO PIN¹ |
+| Add an OATH, OpenPGP or PIV key | the application's own authentication | same | same | same |
+
+¹ when the profile has one.
 
 What a secure profile resists depends on the chip's security state, which
 `librefido info` and the GUI show as a protection level:
@@ -86,8 +104,10 @@ by a press.
 - Never available to secure profiles or HARDENED builds.
 - Never applies to operations that destroy, copy or replace keys or change
   security settings: FIDO/OATH/OpenPGP/PIV resets, device key management,
-  exports, imports, wipes, firmware updates and rollbacks, the ROM loader,
-  profile switches and chip provisioning always need a physical press.
+  exports and imports of profiles, single-key exports, single FIDO
+  credentials and OTP slots imported through the management applet, wipes,
+  firmware updates and rollbacks, the ROM loader, profile switches and chip
+  provisioning always need a physical press.
 - It is what the name says: any program on the computer can then use the
   keys of that application without you noticing. Use it only on a machine
   you control.

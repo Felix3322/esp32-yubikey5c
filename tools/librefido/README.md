@@ -24,6 +24,9 @@ librefido --help
 | `librefido export FILE [--no-encrypt] [--pin \| --pin-file F \| --no-pin] [--passphrase-file F]` | back up the active profile (touch, FIDO PIN if set); encrypted with a passphrase unless `--no-encrypt` (an empty passphrase is refused) |
 | `librefido verify FILE [--device] [--restore-test]` | check a backup without importing it: offline, on the device, or by a full restore into scratch space |
 | `librefido import FILE --profile N [--allow-unencrypted] [--pin \| --pin-file F \| --no-pin]` | restore or clone a backup into a profile slot; an unencrypted backup is refused without `--allow-unencrypted` |
+| `librefido key list [--app fido\|oath\|otp\|openpgp\|piv\|all]` | the single keys of the active profile, numbered (`fido:1`, `oath:2`, ...); the FIDO PIN if set; a touch for FIDO without the PIN and for OATH with a password or OTP PIN; `--json` adds the key IDs |
+| `librefido key export APP:N\|APP:hex:ID -o FILE [--format lfkey\|otpauth\|pem] [--plaintext [--yes-plaintext]] [--admin-pin-file F]` | one key to a file, encrypted with a passphrase (below) |
+| `librefido key import SOURCE [--app A] [--slot S] [--key-id K] [--replace] [--oath-password] [--access-code] [--mgmt-key HEX\|-] [--admin-pin-file F]` | add one key: a `.lfkey` file, an `otpauth://` / `otpauth-migration://` link (or `-`: from standard input), a QR code image, a PIV key (PEM, DER, PKCS#12) or an OpenPGP secret key file |
 | `librefido firmware info/update/confirm/rollback [--pin \| --pin-file F \| --no-pin]` | A/B firmware update with rollback |
 | `librefido provision plan / bind-root-key / lock-debug [--apply]` | chip security, see docs/PROVISIONING.md; bind-root-key also binds a held root key (below) |
 | `librefido factory-reset`, `reboot [--bootloader] [--pin \| --pin-file F \| --no-pin]` | erase everything; restart (or into the ESP32 ROM loader) |
@@ -105,6 +108,52 @@ Windows an owner-only ACL set when the file is created, on NTFS/ReFS. FAT and
 exFAT drives cannot restrict access: an unencrypted backup is not written
 there, an encrypted one is written with a warning. The GUI keeps no
 decrypted backup between operations (a device check reads the file again).
+
+Single keys (firmware 2.1.0 on, docs/KEY_TRANSFER.md): one FIDO passkey,
+OATH account, OTP slot, OpenPGP key or PIV key (with its certificate) out
+of the active profile, or one onto the device.
+
+- Export needs a touch and the FIDO PIN of the profile (asked for as for a
+  backup), an OpenPGP key also the OpenPGP Admin PIN. It is refused by
+  secure and no-export profiles and HARDENED builds; `key list` says so, and
+  `key export` refuses before the touch.
+- Key files (`.lfkey`, magic `LFKEYFIL`) are protected like backups (scrypt,
+  ChaCha20-Poly1305, written privately and atomically) and asked for the
+  same way: a passphrase typed twice or `--passphrase-file`, an empty one
+  refused. A key in the clear needs `--plaintext` and a second confirmation
+  (typed, or `--yes-plaintext` in scripts); importing such a file needs
+  `--allow-unencrypted`. `--format pem` writes a PIV key as encrypted PKCS#8
+  with its certificate; `--format otpauth` an OATH account as an
+  `otpauth://` link, which always holds the secret in the clear (so it needs
+  `--plaintext`; `-o -` prints it, e.g. for a QR code).
+- Import: FIDO passkeys and OTP slots go through the management applet (a
+  touch, the FIDO PIN); FIDO passkeys are refused by secure profiles and
+  HARDENED builds. OATH accounts, OpenPGP keys and PIV keys go through their
+  own applications with their own secrets, as on any card of the kind: the
+  OATH password (`--oath-password` asks for it), the OpenPGP Admin PIN
+  (always asked for, or `--admin-pin-file`), the PIV management key (the
+  default key unless `--mgmt-key`; `-` asks for it). `--slot` chooses the
+  OTP slot (1, 2), the PIV slot (9A, 9C, 9D, 9E, 82..95) or the OpenPGP slot
+  (sig, dec, aut); an OpenPGP key file with several keys needs `--key-id`
+  (or a `--slot` that only one of them fits). A key already where the new
+  one goes is replaced only with `--replace`; an OTP slot with an access code
+  needs it (`--access-code`). A Google Authenticator export adds all its
+  accounts; those the device cannot hold (MD5, 7 digits) and QR codes of the
+  export not given are named. A link on the command line can be seen by
+  other users: `-` reads links from standard input. QR code images need
+  OpenCV (`pip install "./tools/librefido[qr]"`), or zxing-cpp or pyzbar
+  with Pillow.
+- Sign counter: an exported passkey stays on the source key, and an imported
+  one goes on from the source key's counter at the export. A site that
+  checks signature counters may take a passkey used on two keys for a clone
+  and block it: use it on one key only. Both commands print this note.
+
+The GUI "Keys" tab offers the same: an application filter, the list
+(Refresh), "Export selected..." (encrypted by default; no encryption needs a
+second confirmation), "Import file...", "Import otpauth link..." and "Import
+QR image...", asking for the FIDO PIN, the OpenPGP Admin PIN, the OATH
+password, the OTP access code or the PIV management key where needed, and
+before replacing a key.
 
 Every management command, and export, import and firmware transfers as a
 whole, hold a PC/SC transaction that first selects the management applet, so

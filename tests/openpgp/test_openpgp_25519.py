@@ -198,6 +198,45 @@ def test_generated_keys_sign_authenticate_and_decipher(card):
     assert decipher(card, b"\x04" + os.urandom(64), check=False)[1] == SW_WRONG_DATA
 
 
+def ssh_string(b):
+    return len(b).to_bytes(4, "big") + b
+
+
+def test_internal_authenticate_signs_the_data_as_given(card):
+    """INTERNAL AUTHENTICATE with an Ed25519 key is PureEdDSA over the data
+    field (OpenPGP card 3.4, 7.2.13), whatever it looks like: what SSH signs
+    (RFC 4252 user authentication, ssh-keygen -Y's SSHSIG blob), the bare
+    hash of an OpenPGP signature (GnuPG 2.5.8 and later when the key signs as
+    a subkey), and the hash with the last 4 bytes of its DigestInfo in front,
+    which GnuPG before 2.5.8 sends (bug 7589): the card never guesses a
+    prefix to strip, so the signature of that one is not the hash's."""
+    import hashlib
+    set_attrs(card)
+    pub = ed25519.Ed25519PublicKey.from_public_bytes(generate(card, "aut"))
+    card.transmit(0x00, 0x20, 0x00, 0x82, USER_PIN)
+
+    def aut(data):
+        sig = card.transmit(0x00, 0x88, 0x00, 0x00, data, le=0)[0]
+        assert len(sig) == 64
+        return sig
+    key_blob = ssh_string(b"ssh-ed25519") + ssh_string(raw(pub))
+    userauth = (ssh_string(os.urandom(32)) + b"\x32" + ssh_string(b"tester") + ssh_string(b"ssh-connection") +
+                ssh_string(b"publickey") + b"\x01" + ssh_string(b"ssh-ed25519") + ssh_string(key_blob))
+    sshsig = (b"SSHSIG" + ssh_string(b"file") + ssh_string(b"") + ssh_string(b"sha512") +
+              ssh_string(hashlib.sha512(b"a file").digest()))
+    for data in (userauth, sshsig):
+        pub.verify(aut(data), data)
+    digest = hashlib.sha512(b"an OpenPGP signature's hashed data").digest()
+    pub.verify(aut(digest), digest)
+    sha512_info = bytes.fromhex("3051300d060960864801650304020305000440")
+    left_over = sha512_info[15:] + digest
+    assert left_over[:4] == b"\x05\x00\x04\x40"
+    sig = aut(left_over)
+    pub.verify(sig, left_over)
+    with pytest.raises(InvalidSignature):
+        pub.verify(sig, digest)
+
+
 def test_keys_of_the_other_kind_are_refused(card):
     """MSE can swap the decryption and authentication keys: an EdDSA key never
     deciphers and an X25519 key never signs."""
