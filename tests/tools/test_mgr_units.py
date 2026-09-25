@@ -17,8 +17,10 @@ from fido2.ctap2 import ClientPin, Ctap2
 from fido2.hid import CTAPHID
 
 from librefido.mgmt import FIDO_AID
-from librefido.mgr_common import (AuthRequired, CcidCtapDevice, CtapTransportError, ManagerError, NotSupported,
-                                  SecretBlocked, WrongSecret, error_text, sw_error, sw_text, wipe)
+from smartcard.Exceptions import CardConnectionException
+
+from librefido.mgr_common import (AuthRequired, CcidCtapDevice, CtapTransportError, FidoBlockedByOs, ManagerError,
+                                  NotSupported, SecretBlocked, WrongSecret, error_text, sw_error, sw_text, wipe)
 from librefido.mgr_fido import FidoManager, FidoPinNotSet, FidoPinRequired, ctap_error
 from librefido import mgr_oath
 from librefido.mgr_oath import (build_name, derive_key, device_id, format_code, hotp, parse_name, secret_from_base32,
@@ -141,6 +143,29 @@ def test_ccid_ctap_without_fido_application():
         CcidCtapDevice(card).call(CTAPHID.CBOR, b"\x04")
     assert e.value.sw == 0x6A82 and e.value.zh
     assert card.log[-2] == ("select", MGMT_AID, 1)        # the management applet selected again
+
+
+def test_ccid_ctap_blocked_by_windows():
+    # Windows without administrator rights: the SELECT of the FIDO application
+    # fails in the smart card stack (SCARD_E_NO_ACCESS), seen on hardware
+    class Blocked(FakeCard):
+        def select(self, aid):
+            if bytes(aid) == FIDO_AID:
+                self.log.append(("select", bytes(aid), self.depth))
+                raise CardConnectionException("Failed to transmit with protocol T1. Access denied.",
+                                              hresult=-2146435033)    # 0x80100027 as a signed HRESULT
+            return super().select(aid)
+    card = Blocked()
+    with pytest.raises(FidoBlockedByOs) as e:
+        CcidCtapDevice(card).call(CTAPHID.CBOR, b"\x04")
+    assert isinstance(e.value, NotSupported) and "administrator" in str(e.value) and "管理员" in e.value.text(True)
+    assert card.log[-2] == ("select", MGMT_AID, 1)        # the management applet selected again
+    # any other reader failure is reported as itself
+    class Gone(FakeCard):
+        def select(self, aid):
+            raise CardConnectionException("reader gone", hresult=-2146434967)    # 0x80100069
+    with pytest.raises(CardConnectionException):
+        CcidCtapDevice(Gone()).call(CTAPHID.CBOR, b"\x04")
 
 
 def test_ccid_ctap_management_not_selected_again():

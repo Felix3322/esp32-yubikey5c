@@ -125,7 +125,7 @@ refuse it; LibreFido does not try to get around such policies.
 | Client | Transport | Status | Notes |
 |---|---|---|---|
 | Windows 11 WebAuthn | HID | PASS (hardware, firmware 2.0.0) | |
-| Windows 11 raw FIDO HID or FIDO over PC/SC, non-admin | HID / CCID | NO | Windows reserves FIDO for its WebAuthn service |
+| Windows 11 raw FIDO HID or FIDO over PC/SC, non-admin | HID / CCID | NO | Windows reserves FIDO for its WebAuthn service: the SELECT of the FIDO application fails with SCARD_E_NO_ACCESS (seen on hardware with 2.1.0). The key manager's passkey page and the FIDO PIN need the GUI started as administrator (`LibreFido GUI (Admin)`, not yet checked on hardware); single-key transfer uses the management applet and is not affected |
 | Windows 11 PC/SC (librefido, OpenPGP, PIV, OATH) | CCID | PASS (hardware, firmware 2.0.0) | no admin rights needed |
 | Linux pcsc-lite, python-fido2, libfido2 | CCID, HID | PASS (emulator) | |
 | macOS | HID, CCID | UNTESTED | |

@@ -70,6 +70,26 @@ class NotSupported(ManagerError):
     """The device, its firmware or this profile does not offer this."""
 
 
+# Windows (1903 and later) lets only processes started as administrator reach
+# the FIDO function of a security key, over its smart card interface too: the
+# SELECT of the FIDO application fails with this code before it reaches the
+# device. The other applications are not affected.
+SCARD_E_NO_ACCESS = 0x80100027
+
+
+class FidoBlockedByOs(NotSupported):
+    """The operating system keeps this program from the FIDO application
+    (Windows without administrator rights)."""
+
+    def __init__(self):
+        super().__init__(
+            "Windows lets only programs started as administrator use the FIDO function of a security key. "
+            "Start the LibreFido GUI as administrator to manage passkeys and the FIDO PIN; the other pages, "
+            "the Keys tab and single-key export / import work without it.", None,
+            "Windows 只允许以管理员身份启动的程序使用安全密钥的 FIDO 功能。要管理通行密钥和 FIDO PIN，"
+            "请以管理员身份启动 LibreFido GUI；其他页面、“密钥”标签页和单个密钥的导出/导入不需要管理员身份。")
+
+
 def error_text(e, zh=False):
     """Message of any exception for the user: a ManagerError in the chosen
     language, anything else as it describes itself."""
@@ -236,6 +256,10 @@ class CcidCtapDevice(CtapDevice):
                 except ApduError as e:
                     raise NotSupported("the device has no FIDO application (SW %04X)" % e.sw, e.sw,
                                        "设备没有 FIDO 应用（SW %04X）" % e.sw) from None
+                except CardConnectionException as e:
+                    if (getattr(e, "hresult", 0) or 0) & 0xFFFFFFFF == SCARD_E_NO_ACCESS:
+                        raise FidoBlockedByOs() from None
+                    raise
                 answer = card.transmit(cla, ins, p1, p2, data, le=0, check=False, what="FIDO")
             except BaseException:
                 try:

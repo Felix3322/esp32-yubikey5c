@@ -129,3 +129,18 @@ applications, adds and calculates OATH TOTP/HOTP accounts (codes match RFC
   host) / deleted over PC/SC, OpenPGP and PIV selected (corrected PIV
   application template). WebAuthn, the button-driven features and OTP
   typing on this build are still to be checked on the board.
+- 2026-09-25, firmware 2.1.0, same board, written from the ROM loader (BOOT
+  held while plugging in) after a full 16 MB backup (per-chunk MD5) with the
+  Windows esptool; only bootloader, partition table (unchanged), OTA data and
+  application: boots 2.1.0, both profiles and the active one kept, INFO key 19
+  reports export for all five applications and import for FIDO and OTP,
+  health scrub of 128 sectors without an error, OATH TOTP added / calculated
+  (equal to RFC 6238) / deleted through the key manager, OTP / OpenPGP / PIV
+  status read by the key manager. Found on the board: Windows refuses the
+  SELECT of the FIDO application over PC/SC to a program not started as
+  administrator (SCARD_E_NO_ACCESS, the device never sees it), so the key
+  manager's passkey page needs the GUI started as administrator on Windows
+  (now said clearly; the other pages and single-key transfer, which uses the
+  management applet, are not affected). Not yet checked on the board: single-
+  key export / import (needs the FIDO PIN and a touch), the key manager as
+  administrator, WebAuthn.
