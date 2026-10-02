@@ -1,5 +1,10 @@
 # LibreFido 2
 
+Repository: <https://github.com/Felix3322/esp32-yubikey5c>, prebuilt firmware
+under [Releases](https://github.com/Felix3322/esp32-yubikey5c/releases). An
+independent free-software project, not affiliated with or endorsed by Yubico;
+"YubiKey" is a trademark of Yubico AB. 本项目是独立的自由软件，与 Yubico 无关。
+
 > **Security at a glance.** Every key is stored encrypted and authenticated
 > under the profile's root key. Bind that root key to the chip (one
 > irreversible eFuse step, one click in the GUI) and a flash dump no longer
@@ -74,10 +79,33 @@ YubiKey-compatible management, OATH and OTP protocols so that tools such as
 
 ## Quick start (ESP32-S3)
 
-Build (ESP-IDF 5.5):
+Prebuilt firmware (ESP32-S3 with 16 MB flash) is attached to each
+[release](https://github.com/Felix3322/esp32-yubikey5c/releases): a full
+image for a new board, the application image for updates, and the separate
+parts. `SHA256SUMS` is signed with OpenPGP key `F16AE2D3CA9114AE`
+(Felix Liu); check it before flashing:
 
 ```bash
-git clone --recursive <this repository> librefido && cd librefido
+gpg --verify SHA256SUMS.asc SHA256SUMS && sha256sum -c --ignore-missing SHA256SUMS
+```
+
+A new board (the whole image at 0x0; hold BOOT while plugging in):
+
+```bash
+esptool --chip esp32s3 -p COM6 write-flash 0x0 librefido-2.1.0-esp32s3-standard-full.bin
+```
+
+A board that already runs LibreFido 2 (A/B update, keys and settings kept,
+rollback possible):
+
+```bash
+librefido firmware update librefido-2.1.0-esp32s3-standard-app.bin
+```
+
+Build it yourself (ESP-IDF 5.5):
+
+```bash
+git clone --recursive https://github.com/Felix3322/esp32-yubikey5c librefido && cd librefido
 idf.py set-target esp32s3
 idf.py build
 ```
