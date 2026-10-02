@@ -1,0 +1,664 @@
+/*
+ * This file is part of the Pico Keys SDK distribution (https://github.com/polhenarejos/pico-keys-sdk).
+ * Copyright (c) 2022 Pol Henarejos.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#include "file.h"
+#include "pico_keys.h"
+#include "profile.h"
+#include <string.h>
+#include <stdio.h>
+#include "asn1.h"
+#include "apdu.h"
+#include "low_flash.h"
+#include "security.h"
+#include "sks.h"
+#ifdef LF_STORE_V2
+#include "lf_store.h"
+#endif
+
+extern const uintptr_t end_data_pool;
+extern const uintptr_t start_data_pool;
+extern const uintptr_t end_rom_pool;
+extern const uintptr_t start_rom_pool;
+extern int flash_write_data_to_file(file_t *file, const uint8_t *data, uint16_t len);
+extern int flash_program_block(uintptr_t addr, const uint8_t *data, size_t len);
+extern uintptr_t flash_read_uintptr(uintptr_t addr);
+extern uint16_t flash_read_uint16(uintptr_t addr);
+extern uint8_t flash_read_uint8(uintptr_t addr);
+extern uint8_t *flash_read(uintptr_t addr);
+extern int flash_clear_file(file_t *ef);
+extern void low_flash_available();
+
+/* Device files: never reachable by any card command (every ACL byte denies). */
+#define ACL_DEVICE  { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }
+
+#ifndef ENABLE_EMULATION
+file_t sef_phy = {.fid = EF_PHY, .parent = 5, .name = NULL, .type = FILE_TYPE_INTERNAL_EF | FILE_DATA_FLASH | FILE_PERSISTENT, .data = NULL, .ef_structure = FILE_EF_TRANSPARENT, .acl = ACL_DEVICE};
+file_t *ef_phy = &sef_phy;
+#endif
+/* Device root key record. Persistent region: survives application resets. */
+file_t sef_devroot = {.fid = EF_DEVROOT, .parent = 5, .name = NULL, .type = FILE_TYPE_INTERNAL_EF | FILE_DATA_FLASH | FILE_PERSISTENT, .data = NULL, .ef_structure = FILE_EF_TRANSPARENT, .acl = ACL_DEVICE};
+file_t *ef_devroot = &sef_devroot;
+/* Per-namespace epochs of the secure key store (see sks.h). */
+file_t sef_sks_epochs = {.fid = EF_SKS_EPOCHS, .parent = 5, .name = NULL, .type = FILE_TYPE_INTERNAL_EF | FILE_DATA_FLASH | FILE_PERSISTENT, .data = NULL, .ef_structure = FILE_EF_TRANSPARENT, .acl = ACL_DEVICE};
+file_t *ef_sks_epochs = &sef_sks_epochs;
+/* Identity of the mounted profile (persistent: survives application resets). */
+file_t sef_profile_id = {.fid = EF_PROFILE_ID, .parent = 5, .name = NULL, .type = FILE_TYPE_INTERNAL_EF | FILE_DATA_FLASH | FILE_PERSISTENT, .data = NULL, .ef_structure = FILE_EF_TRANSPARENT, .acl = ACL_DEVICE};
+file_t *ef_profile_id = &sef_profile_id;
+
+/* The device files live outside file_entries: every reset of the file
+ * pointers must include them. */
+static file_t *const device_files[] = {
+#ifndef ENABLE_EMULATION
+    &sef_phy,
+#endif
+    &sef_devroot, &sef_sks_epochs, &sef_profile_id,
+};
+
+//puts FCI in the RAPDU
+void process_fci(const file_t *pe, int fmd) {
+    res_APDU_size = 0;
+    if (fmd) {
+        res_APDU[res_APDU_size++] = 0x6f;
+        res_APDU[res_APDU_size++] = 0x00; //computed later
+    }
+
+    res_APDU[res_APDU_size++] = 0x62;
+    res_APDU[res_APDU_size++] = 0x00; //computed later
+
+    res_APDU[res_APDU_size++] = 0x81;
+    res_APDU[res_APDU_size++] = 2;
+    if (pe->data) {
+        if ((pe->type & FILE_DATA_FUNC) == FILE_DATA_FUNC) {
+            uint16_t len = (uint16_t)((int (*)(const file_t *, int))(pe->data))(pe, 0);
+            res_APDU_size += put_uint16_t_be(len, res_APDU + res_APDU_size);
+        }
+        else {
+            uint16_t v = file_get_size(pe);
+            res_APDU_size += put_uint16_t_be(v, res_APDU + res_APDU_size);
+        }
+    }
+    else {
+        memset(res_APDU + res_APDU_size, 0, 2);
+        res_APDU_size += 2;
+    }
+
+    res_APDU[res_APDU_size++] = 0x82;
+    res_APDU[res_APDU_size++] = 1;
+    res_APDU[res_APDU_size] = 0;
+    if (pe->type & FILE_TYPE_INTERNAL_EF) {
+        res_APDU[res_APDU_size++] |= 0x08;
+    }
+    else if (pe->type & FILE_TYPE_WORKING_EF) {
+        res_APDU[res_APDU_size++] |= pe->ef_structure & 0x7;
+    }
+    else if (pe->type & FILE_TYPE_DF) {
+        res_APDU[res_APDU_size++] |= 0x38;
+    }
+    else {
+        res_APDU_size++;
+    }
+
+    res_APDU[res_APDU_size++] = 0x83;
+    res_APDU[res_APDU_size++] = 2;
+    res_APDU_size += put_uint16_t_be(pe->fid, res_APDU + res_APDU_size);
+    /* DF name: name[0] is its length, the name follows (as search_by_name()
+     * reads it), at most 16 bytes. A data object's own content is not a DF
+     * name. */
+    if (pe->name && pe->name[0] > 0 && ((pe->type & FILE_TYPE_DF) || pe->data == NULL)) {
+        uint8_t n = MIN(pe->name[0], 16);
+        res_APDU[res_APDU_size++] = 0x84;
+        res_APDU[res_APDU_size++] = n;
+        memcpy(res_APDU + res_APDU_size, pe->name + 1, n);
+        res_APDU_size += n;
+    }
+    memcpy(res_APDU + res_APDU_size, "\x8A\x01\x05", 3); //life-cycle (5 -> activated)
+    res_APDU_size += 3;
+    uint8_t *meta_data = NULL;
+    uint16_t meta_size = meta_find(pe->fid, &meta_data);
+    /* The template lengths are single bytes (short form): only metadata that
+     * keeps them below 128 fits. */
+    if (meta_size > 0 && meta_data != NULL && res_APDU_size + 3 + meta_size <= 129) {
+        res_APDU[res_APDU_size++] = 0xA5;
+        res_APDU[res_APDU_size++] = 0x81;
+        res_APDU[res_APDU_size++] = (uint8_t )meta_size;
+        memcpy(res_APDU + res_APDU_size, meta_data, meta_size);
+        res_APDU_size += meta_size;
+    }
+    res_APDU[1] = (uint8_t)res_APDU_size - 2;
+    if (fmd) {
+        res_APDU[3] = (uint8_t )res_APDU_size - 4;
+    }
+}
+
+uint16_t dynamic_files = 0;
+file_t dynamic_file[MAX_DYNAMIC_FILES];
+
+bool card_terminated = false;
+
+bool is_parent(const file_t *child, const file_t *parent) {
+    if (child == parent) {
+        return true;
+    }
+    if (child == MF) {
+        return false;
+    }
+    return is_parent(&file_entries[child->parent], parent);
+}
+
+file_t *get_parent(file_t *f) {
+    return &file_entries[f->parent];
+}
+
+/* name[0] of an entry is the length of the name that follows it: only a name
+ * of exactly namelen bytes is compared, so nothing past it is read. */
+file_t *search_by_name(uint8_t *name, uint16_t namelen) {
+    if (name == NULL || namelen == 0) {
+        return NULL;
+    }
+    for (file_t *p = file_entries; p != file_last; p++) {
+        if (p->name && p->name[0] == namelen && memcmp(p->name + 1, name, namelen) == 0) {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+file_t *search_by_fid(const uint16_t fid, const file_t *parent, const uint8_t sp) {
+#ifndef ENABLE_EMULATION
+    if (fid == EF_PHY) {
+        return ef_phy;
+    }
+#endif
+    if (fid == EF_DEVROOT) {
+        return ef_devroot;
+    }
+    if (fid == EF_SKS_EPOCHS) {
+        return ef_sks_epochs;
+    }
+    if (fid == EF_PROFILE_ID) {
+        return ef_profile_id;
+    }
+    for (file_t *p = file_entries; p != file_last; p++) {
+        if (p->fid != 0x0000 && p->fid == fid) {
+            if (!parent || (parent && is_parent(p, parent))) {
+                if (!sp || sp == SPECIFY_ANY ||
+                    (((sp & SPECIFY_EF) && (p->type & (FILE_TYPE_INTERNAL_EF|FILE_TYPE_WORKING_EF))) ||
+                     ((sp & SPECIFY_DF) && p->type == FILE_TYPE_DF))) {
+                    return p;
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+file_t *search_file(const uint16_t fid) {
+    file_t *ef = search_by_fid(fid, NULL, SPECIFY_EF);
+    if (ef) {
+        return ef;
+    }
+    return search_dynamic_file(fid);
+}
+
+uint8_t make_path_buf(const file_t *pe, uint8_t *buf, uint8_t buflen, const file_t *top) {
+    if (!buflen) {
+        return 0;
+    }
+    if (pe == top) { //MF or relative DF
+        return 0;
+    }
+    put_uint16_t_be(pe->fid, buf);
+    return make_path_buf(&file_entries[pe->parent], buf + 2, buflen - 2, top) + 2;
+}
+
+uint8_t make_path(const file_t *pe, const file_t *top, uint8_t *path) {
+    uint8_t buf[MAX_DEPTH * 2], *p = path;
+    put_uint16_t_be(pe->fid, buf);
+    uint8_t depth = make_path_buf(&file_entries[pe->parent], buf + 2, sizeof(buf) - 2, top) + 2;
+    for (int d = depth - 2; d >= 0; d -= 2) {
+        memcpy(p, buf + d, 2);
+        p += 2;
+    }
+    return depth;
+}
+
+file_t *search_by_path(const uint8_t *pe_path, uint8_t pathlen, const file_t *parent) {
+    uint8_t path[MAX_DEPTH * 2];
+    if (pathlen > sizeof(path)) {
+        return NULL;
+    }
+    for (file_t *p = file_entries; p != file_last; p++) {
+        uint8_t depth = make_path(p, parent, path);
+        if (pathlen == depth && memcmp(path, pe_path, depth) == 0) {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+file_t *currentEF = NULL;
+file_t *currentDF = NULL;
+const file_t *selected_applet = NULL;
+bool isUserAuthenticated = false;
+
+/* 0x00 allows, 0xff denies (whatever the operation), 0x90 / 0x1x need the
+ * PIN; anything else, an unknown operation or no file denies. Device files
+ * (persistent region, ids E020..E02F: board settings, root key, profile
+ * identity, key store epochs) are never reachable, whatever their ACL. */
+bool authenticate_action(const file_t *ef, uint8_t op) {
+    if (ef == NULL || op >= sizeof(ef->acl)) {
+        return false;
+    }
+    if ((ef->type & FILE_PERSISTENT) || (ef->fid & 0xFFF0) == 0xE020) {
+        return false;
+    }
+    uint8_t acl = ef->acl[op];
+    if (acl == 0xff) {
+        return false;
+    }
+    else if (acl == 0x0) {
+        return true;
+    }
+    else if (acl == 0x90 || (acl & 0x9F) == 0x10) {
+        // PIN required.
+        if (isUserAuthenticated) {
+            return true;
+        }
+        else {
+            return false;
+        }
+    }
+    return false;
+}
+
+void initialize_flash(bool hard) {
+    if (hard) {
+        const uint8_t empty[8] = { 0 };
+        flash_program_block(end_data_pool, empty, sizeof(empty));
+        low_flash_available();
+    }
+    for (file_t *f = file_entries; f != file_last; f++) {
+        if ((f->type & FILE_DATA_FLASH) == FILE_DATA_FLASH) {
+            f->data = NULL;
+        }
+    }
+    /* Otherwise they keep addresses of the store mounted before (legacy,
+     * migration or scratch region) when the new one lacks them. */
+    for (size_t i = 0; i < sizeof(device_files) / sizeof(device_files[0]); i++) {
+        device_files[i]->data = NULL;
+    }
+    dynamic_files = 0;
+}
+
+extern uintptr_t last_base;
+extern uint32_t num_files;
+void scan_region(bool persistent)
+{
+    uintptr_t endp = end_data_pool, startp = start_data_pool;
+    if (persistent) {
+        endp = end_rom_pool;
+        startp = start_rom_pool;
+    }
+    else {
+        last_base = endp;
+        num_files = 0;
+    }
+    uint32_t guard = 0;
+    /* Every record lies below the one linking to it (and the first below its
+     * list head); anything else is a damaged or uninitialised list and must
+     * not be followed. */
+    uintptr_t above = endp;
+    for (uintptr_t base = flash_read_uintptr(endp); base >= startp && base < above; above = base, base = flash_read_uintptr(base)) {
+        if (base == 0x0 || ++guard > 65536) { //all is empty
+            break;
+        }
+
+        uint16_t fid = flash_read_uint16(base + sizeof(uintptr_t) + sizeof(uintptr_t));
+#if defined(ENABLE_EMULATION) || defined(LF_PROFILE_DEVELOPMENT)
+        /* The emulator tests read record sizes from this log; a release
+         * device does not print its file layout (and boots faster). */
+        printf("[%x] scan fid %x, len %d\n", (unsigned int) base, fid, flash_read_uint16(base + sizeof(uintptr_t) + sizeof(uintptr_t) + sizeof(uint16_t)));
+#endif
+        file_t *file = (file_t *) search_by_fid(fid, NULL, SPECIFY_EF);
+        if (file && (file->type & FILE_DATA_FLASH) != FILE_DATA_FLASH) {
+            /* Constant data or a function (FILE_DATA_FUNC): a stored record
+             * with its fid (an import, a damaged store) never replaces it. */
+            file = NULL;
+        }
+        else if (!file) {
+            file = file_new(fid);
+        }
+        if (file) {
+            file->data = (uint8_t *) (base + sizeof(uintptr_t) + sizeof(uintptr_t) + sizeof(uint16_t));
+        }
+        if (!persistent) {
+            num_files++;
+        }
+        if (flash_read_uintptr(base) == 0x0) {
+            if (base < last_base) {
+                last_base = base;
+            }
+            break;
+        }
+    }
+}
+void wait_flash_finish();
+void scan_flash() {
+#ifdef LF_STORE_V2
+    if (!lf_store_mounted()) {
+        return;     /* safe mode: no store is mounted */
+    }
+#endif
+    initialize_flash(false); //soft initialization
+    uint32_t r1 = (uint32_t)(*(uintptr_t *) flash_read(end_rom_pool)), r2 = (uint32_t)(*(uintptr_t *) flash_read(end_rom_pool + sizeof(uintptr_t)));
+    /* The raw check is what works on flash-encrypted partitions, where erased
+     * flash does not decrypt to 0xFF. */
+    bool blank = low_flash_region_blank(end_rom_pool, 2 * sizeof(uintptr_t)) && r1 != 0 && r2 != 0;
+    if (blank || ((r1 == 0xffffffff || r1 == 0xefefefef) && (r2 == 0xffffffff || r2 == 0xefefefef))) {
+        printf("First initialization (or corrupted!)\n");
+        /* next + prev of the list heads: all that is reserved at end_rom_pool
+         * on 64-bit builds. */
+        uint8_t empty[sizeof(uintptr_t) * 2];
+        memset(empty, 0, sizeof(empty));
+        flash_program_block(end_data_pool, empty, sizeof(empty));
+        flash_program_block(end_rom_pool, empty, sizeof(empty));
+        //low_flash_available();
+        //wait_flash_finish();
+    }
+    printf("SCAN\n");
+    scan_region(true);
+    scan_region(false);
+}
+
+uint8_t *file_read(const uint8_t *addr) {
+    return flash_read((uintptr_t) addr);
+}
+uint16_t file_read_uint16(const uint8_t *addr) {
+    return flash_read_uint16((uintptr_t) addr);
+}
+uint8_t file_read_uint8_offset(const file_t *ef, const uint16_t offset) {
+    return flash_read_uint8((uintptr_t) (file_get_data(ef) + offset));
+}
+uint8_t file_read_uint8(const file_t *ef) {
+    return file_read_uint8_offset(ef, 0);
+}
+
+uint8_t *file_get_data(const file_t *tf) {
+    if (!tf || !tf->data) {
+        return NULL;
+    }
+    return file_read(tf->data + sizeof(uint16_t));
+}
+
+uint16_t file_get_size(const file_t *tf) {
+    if (!tf || !tf->data) {
+        return 0;
+    }
+    uint16_t len = file_read_uint16(tf->data);
+    uintptr_t payload = (uintptr_t) tf->data + sizeof(uint16_t);
+    if (payload >= start_data_pool && payload < end_rom_pool) {
+        /* A stored record: its payload never runs past its sector (a larger
+         * length is a lost length write, see flash.c). */
+        uintptr_t room = 4096 - (payload & 4095);
+        if (len > room) {
+            len = (uint16_t) room;
+        }
+    }
+    return len;
+}
+
+int file_put_data(file_t *file, const uint8_t *data, uint16_t len) {
+    return flash_write_data_to_file(file, data, len);
+}
+
+file_t *search_dynamic_file(uint16_t fid) {
+    for (int i = 0; i < dynamic_files; i++) {
+        if (dynamic_file[i].fid == fid) {
+            return &dynamic_file[i];
+        }
+    }
+    return NULL;
+}
+
+int delete_dynamic_file(file_t *f) {
+    if (f == NULL) {
+        return PICOKEY_ERR_FILE_NOT_FOUND;
+    }
+    for (int i = 0; i < dynamic_files; i++) {
+        if (dynamic_file[i].fid == f->fid) {
+            for (int j = i + 1; j < dynamic_files; j++) {
+                memcpy(&dynamic_file[j - 1], &dynamic_file[j], sizeof(file_t));
+            }
+            dynamic_files--;
+            return PICOKEY_OK;
+        }
+    }
+    return PICOKEY_ERR_FILE_NOT_FOUND;
+}
+
+file_t *file_new(uint16_t fid) {
+    file_t *f;
+    if ((f = search_file(fid))) {
+        return f;
+    }
+    if (dynamic_files == MAX_DYNAMIC_FILES) {
+        return NULL;
+    }
+    f = &dynamic_file[dynamic_files];
+    dynamic_files++;
+    file_t file = {
+        .fid = fid,
+        .parent = 5,
+        .name = NULL,
+        .type = FILE_TYPE_WORKING_EF,
+        .ef_structure = FILE_EF_TRANSPARENT,
+        .data = NULL,
+        .acl = { 0 }
+    };
+    memcpy(f, &file, sizeof(file_t));
+    //memset((uint8_t *)f->acl, 0x90, sizeof(f->acl));
+    return f;
+}
+uint16_t meta_find(uint16_t fid, uint8_t **out) {
+    file_t *ef = search_file(EF_META);
+    if (!ef) {
+        return 0;
+    }
+    uint16_t tag = 0x0;
+    uint8_t *tag_data = NULL, *p = NULL;
+    uint16_t tag_len = 0;
+    asn1_ctx_t ctxi;
+    asn1_ctx_init(file_get_data(ef), file_get_size(ef), &ctxi);
+    while (walk_tlv(&ctxi, &p, &tag, &tag_len, &tag_data)) {
+        if (tag_len < 2) {
+            continue;
+        }
+        uint16_t cfid = get_uint16_t_be(tag_data);
+        if (cfid == fid) {
+            if (out) {
+                *out = tag_data + 2;
+            }
+            return tag_len - 2;
+        }
+    }
+    return 0;
+}
+int meta_delete(uint16_t fid) {
+    file_t *ef = search_file(EF_META);
+    if (!ef) {
+        return PICOKEY_ERR_FILE_NOT_FOUND;
+    }
+    uint16_t tag = 0x0;
+    uint8_t *tag_data = NULL, *p = NULL;
+    uint16_t tag_len = 0;
+    uint8_t *fdata = NULL;
+    asn1_ctx_t ctxi;
+    asn1_ctx_init(file_get_data(ef), file_get_size(ef), &ctxi);
+    while (walk_tlv(&ctxi, &p, &tag, &tag_len, &tag_data)) {
+        uint8_t *tpos = p - tag_len - format_tlv_len(tag_len, NULL) - 1;
+        if (tag_len < 2) {
+            continue;
+        }
+        uint16_t cfid = get_uint16_t_be(tag_data);
+        if (cfid == fid) {
+            uint16_t new_len = ctxi.len - 1 - tag_len - format_tlv_len(tag_len, NULL);
+            if (new_len == 0) {
+                flash_clear_file(ef);
+            }
+            else {
+                fdata = (uint8_t *) calloc(1, new_len);
+                if (tpos > ctxi.data) {
+                    memcpy(fdata, ctxi.data, tpos - ctxi.data);
+                }
+                if (ctxi.data + ctxi.len > p) {
+                    memcpy(fdata + (tpos - ctxi.data), p, ctxi.data + ctxi.len - p);
+                }
+                int r = file_put_data(ef, fdata, new_len);
+                free(fdata);
+                if (r != PICOKEY_OK) {
+                    return PICOKEY_EXEC_ERROR;
+                }
+            }
+            low_flash_available();
+            break;
+        }
+    }
+    return PICOKEY_OK;
+}
+int meta_add(uint16_t fid, const uint8_t *data, uint16_t len) {
+    int r;
+    file_t *ef = search_file(EF_META);
+    if (!ef) {
+        return PICOKEY_ERR_FILE_NOT_FOUND;
+    }
+    uint16_t ef_size = file_get_size(ef);
+    uint8_t *fdata = (uint8_t *) calloc(1, ef_size ? ef_size : 1);
+    if (fdata == NULL) {
+        return PICOKEY_ERR_MEMORY_FATAL;
+    }
+    if (ef_size > 0) {          /* an empty file has no data pointer */
+        memcpy(fdata, file_get_data(ef), ef_size);
+    }
+    uint16_t tag = 0x0;
+    uint8_t *tag_data = NULL, *p = NULL;
+    uint16_t tag_len = 0;
+    asn1_ctx_t ctxi;
+    asn1_ctx_init(fdata, ef_size, &ctxi);
+    while (walk_tlv(&ctxi, &p, &tag, &tag_len, &tag_data)) {
+        if (tag_len < 2) {
+            continue;
+        }
+        uint16_t cfid = get_uint16_t_be(tag_data);
+        if (cfid == fid) {
+            if (tag_len - 2 == len) { //an update
+                memcpy(p - tag_len + 2, data, len);
+                r = file_put_data(ef, fdata, ef_size);
+                free(fdata);
+                if (r != PICOKEY_OK) {
+                    return PICOKEY_EXEC_ERROR;
+                }
+                return PICOKEY_OK;
+            }
+            else {   //needs reallocation
+                uint8_t *tpos = p - asn1_len_tag(tag, tag_len);
+                memmove(tpos, p, fdata + ef_size - p);
+                tpos += fdata + ef_size - p;
+                volatile uintptr_t meta_offset = tpos - fdata;
+                ef_size += len - (tag_len - 2);
+                if (len > tag_len - 2) {
+                    uint8_t *fdata_new = (uint8_t *) realloc(fdata, ef_size);
+                    if (fdata_new != NULL) {
+                        fdata = fdata_new;
+                    }
+                    else {
+                        free(fdata);
+                        return PICOKEY_ERR_MEMORY_FATAL;
+                    }
+                }
+                uint8_t *f = fdata + meta_offset;
+                *f++ = fid & 0xff;
+                f += format_tlv_len(len + 2, f);
+                f += put_uint16_t_be(fid, f);
+                memcpy(f, data, len);
+                r = file_put_data(ef, fdata, ef_size);
+                free(fdata);
+                if (r != PICOKEY_OK) {
+                    return PICOKEY_EXEC_ERROR;
+                }
+                return PICOKEY_OK;
+            }
+        }
+    }
+    fdata = (uint8_t *) realloc(fdata, ef_size + asn1_len_tag(fid & 0x1f, len + 2));
+    uint8_t *f = fdata + ef_size;
+    *f++ = fid & 0x1f;
+    f += format_tlv_len(len + 2, f);
+    f += put_uint16_t_be(fid, f);
+    memcpy(f, data, len);
+    r = file_put_data(ef, fdata, ef_size + (uint16_t)asn1_len_tag(fid & 0x1f, len + 2));
+    free(fdata);
+    if (r != PICOKEY_OK) {
+        return PICOKEY_EXEC_ERROR;
+    }
+    return PICOKEY_OK;
+}
+
+bool file_has_data(const file_t *f) {
+    return f != NULL && f->data != NULL && file_get_size(f) > 0;
+}
+
+/* Clears (and scrubs) every stored file whose fid owned() claims: the reset
+ * of one application. The files of the other applications and of the
+ * device (profile identity, root key, board settings) stay untouched, which
+ * initialize_flash(true) could not guarantee. */
+int file_wipe_matching(bool (*owned)(uint16_t fid)) {
+    int ret = PICOKEY_OK;
+    for (file_t *f = file_entries; f != file_last; f++) {
+        if (f->fid != 0 && (f->type & FILE_DATA_FLASH) == FILE_DATA_FLASH && f->data && owned(f->fid)) {
+            if (flash_clear_file(f) != PICOKEY_OK) {
+                ret = PICOKEY_EXEC_ERROR;
+            }
+        }
+    }
+    /* backwards: delete_dynamic_file() closes the gap it leaves */
+    for (int i = (int) dynamic_files - 1; i >= 0; i--) {
+        file_t *f = &dynamic_file[i];
+        if (owned(f->fid)) {
+            if (flash_clear_file(f) != PICOKEY_OK) {
+                ret = PICOKEY_EXEC_ERROR;
+            }
+            delete_dynamic_file(f);
+        }
+    }
+    low_flash_available();
+    return ret;
+}
+
+int delete_file(file_t *ef) {
+    if (ef == NULL) {
+        return PICOKEY_OK;
+    }
+    meta_delete(ef->fid);
+    if (flash_clear_file(ef) != PICOKEY_OK) {
+        return PICOKEY_EXEC_ERROR;
+    }
+    if (delete_dynamic_file(ef) != PICOKEY_OK) {
+        return PICOKEY_EXEC_ERROR;
+    }
+    low_flash_available();
+    return PICOKEY_OK;
+}

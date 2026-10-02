@@ -1,12 +1,15 @@
-[submodule "pico-fido"]
-	path = pico-fido
-	url = ../pico-fido.git
-	branch = main
-[submodule "pico-openpgp"]
-	path = pico-openpgp
-	url = ../pico-openpgp.git
-	branch = main
-[submodule "pico-keys-sdk"]
-	path = pico-keys-sdk
-	url = ../pico-keys-sdk.git
-	branch = main
+[submodule "pico-fido/pico-keys-sdk"]
+	path = pico-fido/pico-keys-sdk
+	url = https://github.com/librekeys/pico-keys-sdk.git
+[submodule "pico-keys-sdk/mbedtls"]
+	path = pico-keys-sdk/mbedtls
+	url = https://github.com/ARMmbed/mbedtls
+[submodule "pico-keys-sdk/mlkem"]
+	path = pico-keys-sdk/mlkem
+	url = https://github.com/pq-code-package/mlkem-native/
+[submodule "pico-keys-sdk/tinycbor"]
+	path = pico-keys-sdk/tinycbor
+	url = https://github.com/intel/tinycbor.git
+[submodule "pico-openpgp/pico-keys-sdk"]
+	path = pico-openpgp/pico-keys-sdk
+	url = https://github.com/librekeys/pico-keys-sdk.git
