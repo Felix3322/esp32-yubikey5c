@@ -5,6 +5,8 @@ under [Releases](https://github.com/Felix3322/esp32-yubikey5c/releases). An
 independent free-software project, not affiliated with or endorsed by Yubico;
 "YubiKey" is a trademark of Yubico AB. 本项目是独立的自由软件，与 Yubico 无关。
 
+> I developed this for sharing OpenAI ChatGPT accounts (as access at daybreak began requiring a hardware security key); you can copy the AAGUID from the Yubico website, allowing the ESP32 to function like a genuine YubiKey.
+
 > **Security at a glance.** Every key is stored encrypted and authenticated
 > under the profile's root key. Bind that root key to the chip (one
 > irreversible eFuse step, one click in the GUI) and a flash dump no longer
