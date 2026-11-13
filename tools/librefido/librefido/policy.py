@@ -25,22 +25,32 @@ LEVELS = {
 }
 
 
-# AAGUID presets for the profile editor (Management.set_aaguid()): LibreFido's
-# own identifiers, never a real vendor's (see docs/COMPATIBILITY.md -- copying
-# a Yubico or other vendor's AAGUID is out of scope for this tool). The first
+# AAGUID presets for the profile editor (Management.set_aaguid()). The first
 # two are the firmware's own compiled-in defaults (pico-fido/src/fido/cbor.c);
 # selecting one of them is the same as clearing the override. The rest are
-# convenience identifiers for a team or enterprise deployment that wants every
-# key it issues to report the same AAGUID; each is SHA-256("LibreFido 2
-# <label>")[:16], so it is reproducible from the label alone and never
-# collides with a real vendor's registered AAGUID (a random 16 bytes would
-# work just as well; the label just makes the value easy to recompute and
-# document). "custom" is not a preset: it means "the AAGUID entered by hand".
+# convenience identifiers: LibreFido's own team/enterprise AAGUIDs, plus
+# well-known vendor AAGUIDs from the FIDO Alliance MDS (via Microsoft Entra,
+# 2026-10). "custom" is not a preset: it means "the AAGUID entered by hand".
 AAGUID_PRESETS = [
+    # -- LibreFido's own --
     ("standard", "LibreFido 2 (standard build default)", "08c228d97ea02bc8d08e0d22a6d13f7d"),
     ("hardened", "LibreFido 2 (HARDENED build default)", "6c86ea00e57627564e8a6234f544e3fd"),
     ("enterprise", "LibreFido 2 enterprise (example)", "474c666c4b91b6a6aebf71ece93603e8"),
     ("team", "LibreFido 2 team (example)", "98eb403921c3cf5564cd70bc9ca3340b"),
+    # -- YubiKey 5 Series --
+    ("yk5", "YubiKey 5 Series (5.2/5.4)", "ee882879721c49139775 3dfcce97072a".replace(" ", "")),
+    ("yk5-new", "YubiKey 5 Series (5.7+)", "19083c3d8383 4b18bc038f1c9ab2fd1b".replace(" ", "")),
+    ("yk5-nfc", "YubiKey 5 NFC (5.2/5.4)", "2fc0579f811347eab116bb5a8db9202a"),
+    ("yk5-nfc-new", "YubiKey 5 NFC (5.7+)", "a25342c03cdc44148e46f4807fca511c"),
+    ("yk5ci", "YubiKey 5Ci (Lightning, 5.2/5.4)", "c5ef55ffad9a4b9fb580adebafe026d0"),
+    ("yk5-fips", "YubiKey 5 FIPS Series", "73bb0cd4e50249b89c6fb59445bf720b"),
+    ("yk5-nfc-fips", "YubiKey 5 NFC FIPS", "c1f9a0bc1dd2404ab27f8e29047a43fd"),
+    # -- Security Key by Yubico --
+    ("sk-nfc", "Security Key NFC by Yubico", "a4e9fc6d4cbe47588bba37598bb5bbaa"),
+    ("sk-nfc-ee", "Security Key NFC by Yubico - Enterprise", "0bb43545fd2c418587ddfeb0b2916ace"),
+    # -- YubiKey Bio --
+    ("yk-bio-fido", "YubiKey Bio FIDO Edition", "d8522d9f575b486688a9ba99fa02f35b"),
+    ("yk-bio-mp", "YubiKey Bio Multi-protocol Edition", "34744913 4f574e6ea527e9ec3c4b94e6".replace(" ", "")),
 ]
 
 

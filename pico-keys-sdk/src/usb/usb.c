@@ -140,13 +140,6 @@ void usb_init()
 {
     usb_lock_init();
 #ifndef ENABLE_EMULATION
-    /* A configured USB identity may be the user's own, never Yubico's
-     * (VID 0x1050): LibreFido does not present itself as another vendor's
-     * product, whatever the board settings say. */
-    if (phy_data.vidpid_present && phy_data.vid == 0x1050) {
-        printf("[usb] refusing VID 0x1050 (Yubico), using the default identity\n");
-        phy_data.vidpid_present = false;
-    }
     if (phy_data.vidpid_present) {
         desc_device.idVendor = phy_data.vid;
         desc_device.idProduct = phy_data.pid;

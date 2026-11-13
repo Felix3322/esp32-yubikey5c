@@ -346,6 +346,11 @@ def cmd_presence(args):
 
 
 def cmd_board(args):
+    if args.reset_usb_id and (args.vid is not None or args.pid is not None):
+        sys.exit("--reset-usb-id cannot be combined with --vid/--pid")
+    if (args.vid is None) != (args.pid is None):
+        sys.exit("--vid and --pid are set together")
+
     def run(m):
         info = m.info()
         if args.led_brightness is not None:
@@ -354,9 +359,22 @@ def cmd_board(args):
             _change_hint(m, info)
             m.set_led_brightness(args.led_brightness)
             info = m.info()
+        if args.reset_usb_id or args.vid is not None:
+            _change_hint(m, info)
+            try:
+                if args.reset_usb_id:
+                    m.reset_usb_vidpid()
+                else:
+                    m.set_usb_vidpid(args.vid, args.pid)
+            except ApduError:
+                raise
+            print("USB identity changed; replug (or restart) the device for it to take effect", file=sys.stderr)
+            info = m.info()
         board = info.get("board")
         if board is None:
             sys.exit("the device reports no board settings (firmware before management protocol 3, or safe mode)")
+        if "vid" in board:
+            board = dict(board, usb="%04X:%04X" % (board["vid"], board["pid"]))
         _print(board, args.json)
     with_session(args, run)
 
@@ -1240,8 +1258,8 @@ def main(argv=None):
     pr.add_argument("--export", choices=["on", "off"], help="allow exporting this profile")
     pr.add_argument("--aaguid", metavar="UUID|NAME|default",
                     help="the AAGUID this profile (must be the active one) reports from now on: a UUID "
-                         "(8-4-4-4-12 or 32 hex digits), a preset name (%s), or 'default' for the firmware's own. Never set this "
-                         "to a real vendor's AAGUID (docs/COMPATIBILITY.md); always a touch."
+                         "(8-4-4-4-12 or 32 hex digits), a preset name (%s), or 'default' for the firmware's own; "
+                         "always a touch."
                          % ", ".join(name for name, _, _ in policy.AAGUID_PRESETS))
     pr.add_argument("--yes", action="store_true", help="create-secure: replace a used slot without asking")
     pr.set_defaults(fn=cmd_profile)
@@ -1258,6 +1276,10 @@ def main(argv=None):
 
     bd = sub.add_parser("board", help="board settings shared by all profiles")
     bd.add_argument("--led-brightness", type=int, metavar="N", help="0..255, applied at once")
+    bd.add_argument("--vid", type=lambda s: int(s, 0), metavar="VID",
+                    help="custom USB vendor ID (e.g. 0x1209); set with --pid")
+    bd.add_argument("--pid", type=lambda s: int(s, 0), metavar="PID", help="custom USB product ID; set with --vid")
+    bd.add_argument("--reset-usb-id", action="store_true", help="back to the default USB identity")
     bd.set_defaults(fn=cmd_board)
 
     ex = sub.add_parser("export", help="back up the active profile to a file")

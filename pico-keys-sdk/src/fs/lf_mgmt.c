@@ -273,9 +273,20 @@ static CborError encode_board(CborEncoder *map) {
         phy_unserialize_data(s->board, s->board_len, &rec);
     }
     e |= cbor_encode_uint(map, 17);
-    e |= cbor_encoder_create_map(map, &b, 1);
+    e |= cbor_encoder_create_map(map, &b, rec.vidpid_present ? 4 : 2);
     e |= cbor_encode_uint(&b, 1);
     e |= cbor_encode_uint(&b, rec.led_brightness_present ? rec.led_brightness : LED_BRIGHTNESS_FULL);
+    /* The custom USB VID/PID of this device (shared by every profile): absent
+     * when it enumerates with the firmware's default identity, key 4 then
+     * false. The host already knows (and the OS shows) the default. */
+    if (rec.vidpid_present) {
+        e |= cbor_encode_uint(&b, 2);
+        e |= cbor_encode_uint(&b, rec.vid);
+        e |= cbor_encode_uint(&b, 3);
+        e |= cbor_encode_uint(&b, rec.pid);
+    }
+    e |= cbor_encode_uint(&b, 4);
+    e |= cbor_encode_boolean(&b, rec.vidpid_present);
     e |= cbor_encoder_close_container(map, &b);
     return e;
 }
@@ -675,9 +686,12 @@ static int cmd_button_slots(void) {
     return SW_OK();
 }
 
-/* Data: CBOR {1: LED brightness 0..255}. Board settings are device wide
- * and applied at once; written through phy_save() (only a real change,
- * counted against the free allowance). */
+/* Data: CBOR {1: LED brightness 0..255, 2: USB VID, 3: USB PID, 4: reset the
+ * USB identity to the default (bool)}. Board settings are device wide and
+ * applied at once; written through phy_save() (only a real change, counted
+ * against the free allowance). A custom VID/PID takes effect when the device
+ * next enumerates (replug / restart). The VID and the PID are set together;
+ * key 4 clears them back to the firmware default. */
 static int cmd_board_set(void) {
     int sw = sys_command_check(0);
     if (sw != 0x9000) {
@@ -689,6 +703,8 @@ static int cmd_board_set(void) {
     CborParser parser;
     CborValue map, it;
     int brightness = -1;
+    int64_t vid = -1, pid = -1;
+    bool reset_usb = false;
     if (!mgmt_cbor_open(&parser, &map, &it)) {
         return SW_WRONG_DATA();
     }
@@ -706,16 +722,60 @@ static int cmd_board_set(void) {
             brightness = (int) v;
             cbor_value_advance_fixed(&it);
         }
+        else if (k == 2 || k == 3) {
+            uint64_t v = 0;
+            if (!cbor_value_is_unsigned_integer(&it) || cbor_value_get_uint64(&it, &v) != CborNoError || v > 0xFFFF) {
+                return SW_INCORRECT_PARAMS();
+            }
+            if (k == 2) {
+                vid = (int64_t) v;
+            }
+            else {
+                pid = (int64_t) v;
+            }
+            cbor_value_advance_fixed(&it);
+        }
+        else if (k == 4) {
+            bool v = false;
+            if (!cbor_value_is_boolean(&it) || cbor_value_get_boolean(&it, &v) != CborNoError) {
+                return SW_INCORRECT_PARAMS();
+            }
+            reset_usb = v;
+            cbor_value_advance_fixed(&it);
+        }
         else if (!mgmt_cbor_skip(&it)) {
             return SW_WRONG_DATA();
         }
     }
-    if (brightness < 0) {
-        return SW_OK();
+    /* The USB identity is set by VID and PID together, or cleared by key 4:
+     * not both, and not one of VID/PID without the other. */
+    if (reset_usb && (vid >= 0 || pid >= 0)) {
+        return SW_INCORRECT_PARAMS();
+    }
+    if (!reset_usb && (vid >= 0) != (pid >= 0)) {
+        return SW_INCORRECT_PARAMS();
+    }
+    if (vid == 0) {
+        return SW_INCORRECT_PARAMS();           /* VID 0 is not a USB identity */
+    }
+    if (brightness < 0 && vid < 0 && !reset_usb) {
+        return SW_OK();                         /* nothing to change */
     }
     phy_ensure_loaded();
-    phy_data.led_brightness = (uint8_t) brightness;
-    phy_data.led_brightness_present = true;
+    if (brightness >= 0) {
+        phy_data.led_brightness = (uint8_t) brightness;
+        phy_data.led_brightness_present = true;
+    }
+    if (reset_usb) {
+        phy_data.vidpid_present = false;
+        phy_data.vid = 0;
+        phy_data.pid = 0;
+    }
+    else if (vid >= 0) {
+        phy_data.vid = (uint16_t) vid;
+        phy_data.pid = (uint16_t) pid;
+        phy_data.vidpid_present = true;
+    }
     int r = phy_save();
     if (r != PICOKEY_OK) {
         return r == PICOKEY_ERR_BLOCKED ? SW_CONDITIONS_NOT_SATISFIED() : SW_MEMORY_FAILURE();

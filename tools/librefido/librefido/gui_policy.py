@@ -63,13 +63,23 @@ ZH = {
     "aaguid-bad-hex": "AAGUID 格式不对：应为 16 字节，例如 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx（也可以不带连字符，32 位十六进制）。",
     "aaguid-confirm": ("把当前环境的 AAGUID 改为 %s？\n\n"
                        "这会改变本设备在网站看来的“型号身份”；已注册的通行密钥不受影响，"
-                       "但之后新建的通行密钥和 attestation 会带上新的 AAGUID。\n"
-                       "切勿设置成真实厂商（如 YubiKey）的 AAGUID：那是冒充，不受支持也不安全。"),
+                       "但之后新建的通行密钥和 attestation 会带上新的 AAGUID。"),
     "AAGUID:": "AAGUID：",
     "LibreFido 2 (standard build default)": "LibreFido 2（标准版固件默认值）",
     "LibreFido 2 (HARDENED build default)": "LibreFido 2（HARDENED 版固件默认值）",
     "LibreFido 2 enterprise (example)": "LibreFido 2 企业版（示例）",
     "LibreFido 2 team (example)": "LibreFido 2 团队版（示例）",
+    "YubiKey 5 Series (5.2/5.4)": "YubiKey 5 系列（5.2/5.4）",
+    "YubiKey 5 Series (5.7+)": "YubiKey 5 系列（5.7+）",
+    "YubiKey 5 NFC (5.2/5.4)": "YubiKey 5 NFC（5.2/5.4）",
+    "YubiKey 5 NFC (5.7+)": "YubiKey 5 NFC（5.7+）",
+    "YubiKey 5Ci (Lightning, 5.2/5.4)": "YubiKey 5Ci（Lightning，5.2/5.4）",
+    "YubiKey 5 FIPS Series": "YubiKey 5 FIPS 系列",
+    "YubiKey 5 NFC FIPS": "YubiKey 5 NFC FIPS",
+    "Security Key NFC by Yubico": "Security Key NFC by Yubico",
+    "Security Key NFC by Yubico - Enterprise": "Security Key NFC by Yubico 企业版",
+    "YubiKey Bio FIDO Edition": "YubiKey Bio FIDO 版",
+    "YubiKey Bio Multi-protocol Edition": "YubiKey Bio 多协议版",
 }
 
 

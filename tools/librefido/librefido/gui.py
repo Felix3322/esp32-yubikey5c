@@ -231,6 +231,16 @@ KEY_APP_TITLES = {"fido": "FIDO2 passkeys", "oath": "OATH accounts", "otp": "OTP
                   "piv": "PIV keys"}
 PGP_SLOT_TITLES = dict(zip(PGP_SLOTS, ("signature", "decryption", "authentication")))
 ZH.update({
+    "USB identity": "USB 标识",
+    "Current:": "当前：",
+    "default": "默认",
+    "custom": "自定义",
+    "VID (hex):": "VID（十六进制）：",
+    "PID (hex):": "PID（十六进制）：",
+    "Apply USB identity": "应用 USB 标识",
+    "Reset to default": "恢复默认",
+    "A custom USB VID/PID takes effect after you replug the device.": "自定义 USB VID/PID 在重新插拔设备后生效。",
+    "Enter the VID and PID as hex, e.g. 1209 and 2440.": "VID 和 PID 请填十六进制，例如 1209 和 2440。",
     "Keys": "密钥",
     "Key manager": "密钥管理",
     "Application": "应用",
@@ -519,6 +529,33 @@ class MainWindow(QMainWindow):
             self.sec_labels[key] = lbl
             sform.addRow(T(title) + T(":"), lbl)
         lay.addWidget(sec)
+        usb = QGroupBox(T("USB identity"))
+        uform = QFormLayout(usb)
+        self.usb_current = QLabel("-")
+        self.usb_current.setTextFormat(Qt.TextFormat.PlainText)
+        self.usb_current.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        uform.addRow(T("Current:"), self.usb_current)
+        self.usb_vid = QLineEdit()
+        self.usb_vid.setPlaceholderText("1209")
+        self.usb_vid.setMaxLength(4)
+        self.usb_pid = QLineEdit()
+        self.usb_pid.setPlaceholderText("2440")
+        self.usb_pid.setMaxLength(4)
+        uform.addRow(T("VID (hex):"), self.usb_vid)
+        uform.addRow(T("PID (hex):"), self.usb_pid)
+        urow = QHBoxLayout()
+        ab = QPushButton(T("Apply USB identity"))
+        ab.clicked.connect(self._set_usb_identity)
+        rb = QPushButton(T("Reset to default"))
+        rb.clicked.connect(self._reset_usb_identity)
+        urow.addWidget(ab)
+        urow.addWidget(rb)
+        uform.addRow(urow)
+        note = QLabel(T("A custom USB VID/PID takes effect after you replug the device."))
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#888;")
+        uform.addRow(note)
+        lay.addWidget(usb)
         fwg = QGroupBox(T("Firmware update"))
         fwl = QVBoxLayout(fwg)
         self.fw_state = QLabel("-")
@@ -796,6 +833,11 @@ class MainWindow(QMainWindow):
         for key, lbl in self.sec_labels.items():
             v = info["security"].get(key)
             lbl.setText(v if isinstance(v, str) else yn(v))
+        board = info.get("board") or {}
+        if board.get("usb_custom") and "vid" in board:
+            self.usb_current.setText("%04X:%04X (%s)" % (board["vid"], board["pid"], T("custom")))
+        else:
+            self.usb_current.setText(T("default"))
         self.statusBar().showMessage("%s  %s" % (self.reader_box.currentText(), info.get("boot_message", "")))
         for p in info.get("profiles", []):
             r = p["index"]
@@ -949,6 +991,21 @@ class MainWindow(QMainWindow):
         text, ok = QInputDialog.getText(self, T("Factory reset..."), T("Type 'erase' to erase every profile and key:"))
         if ok and text == "erase":
             self._run(lambda p: self.mgmt.factory_reset(), touch=True, reboots=True)
+
+    def _set_usb_identity(self):
+        try:
+            vid, pid = int(self.usb_vid.text().strip(), 16), int(self.usb_pid.text().strip(), 16)
+        except ValueError:
+            QMessageBox.warning(self, T("Error"), T("Enter the VID and PID as hex, e.g. 1209 and 2440."))
+            return
+        if not (0 < vid <= 0xFFFF) or not (0 <= pid <= 0xFFFF):
+            QMessageBox.warning(self, T("Error"), T("Enter the VID and PID as hex, e.g. 1209 and 2440."))
+            return
+
+        self._run(lambda p: self.mgmt.set_usb_vidpid(vid, pid), touch=self._change_touch(), refresh=True)
+
+    def _reset_usb_identity(self):
+        self._run(lambda p: self.mgmt.reset_usb_vidpid(), touch=self._change_touch(), refresh=True)
 
     def _switch(self):
         s = self._selected_slot()

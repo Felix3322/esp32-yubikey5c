@@ -282,7 +282,11 @@ class Management:
                 } for p in m[15]],
             })
         if 17 in m:
-            out["board"] = {"led_brightness": m[17].get(1)}
+            b17 = m[17]
+            board = {"led_brightness": b17.get(1), "usb_custom": bool(b17.get(4))}
+            if 2 in b17 and 3 in b17:          # the custom USB identity, when set
+                board["vid"], board["pid"] = b17[2], b17[3]
+            out["board"] = board
         if 18 in m:
             out["free_changes"] = m[18]     # changes without a touch left (names, colours, board, ...)
         return out
@@ -452,13 +456,25 @@ class Management:
         the free changes are used up)."""
         self._cmd(INS_BOARD_SET, data=cbor.encode({1: value}), what="LED brightness")
 
+    def set_usb_vidpid(self, vid, pid):
+        """The USB VID and PID this device reports from now on (device wide;
+        a touch once the free changes are used up). Takes effect when the
+        device next enumerates (replug / restart). Both must be 0..0xFFFF;
+        VID must not be 0."""
+        if not (0 < vid <= 0xFFFF) or not (0 <= pid <= 0xFFFF):
+            raise ValueError("VID must be 1..0xFFFF and PID 0..0xFFFF")
+        self._cmd(INS_BOARD_SET, data=cbor.encode({2: vid, 3: pid}), what="USB identity")
+
+    def reset_usb_vidpid(self):
+        """Back to the firmware's default USB identity (takes effect on the
+        next enumeration)."""
+        self._cmd(INS_BOARD_SET, data=cbor.encode({4: True}), what="USB identity")
+
     def set_aaguid(self, aaguid=None):
         """AAGUID the mounted profile reports in getInfo and attestation from
         now on: 16 raw bytes, a 32-hex-digit string, or None to go back to
-        the firmware's own default. Never a real vendor's AAGUID (this tool
-        does not check for one; that is a policy decision for whoever calls
-        it -- see docs/COMPATIBILITY.md). Always a touch. Refused (6d00)
-        on firmware without the hook (no FIDO applet in this build)."""
+        the firmware's own default. Always a touch. Refused (6d00) on
+        firmware without the hook (no FIDO applet in this build)."""
         m = {}
         if aaguid is not None:
             raw = policy.parse_aaguid(aaguid) if isinstance(aaguid, str) else bytes(aaguid)

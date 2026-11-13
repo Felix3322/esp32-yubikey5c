@@ -17,13 +17,7 @@
 
 include(pico-keys-sdk/cmake/version.cmake OPTIONAL)
 
-# Other vendors' identities are for personal compatibility experiments only
-# and must never be distributed. Yubico's (VID 0x1050) is not available at
-# all: LibreFido does not present itself as a YubiKey.
 option(VIDPID "Set specific VID/PID from a known platform {NitroHSM, NitroFIDO2, NitroStart, NitroPro, Nitro3, Gnuk, GnuPG}" "None")
-if(VIDPID MATCHES "^Yubi")
-    message(FATAL_ERROR "VIDPID=${VIDPID}: Yubico USB identities are not supported (LibreFido never presents itself as a YubiKey)")
-endif()
 
 message(STATUS "VIDPID:\t\t\t '${VIDPID}'")
 
