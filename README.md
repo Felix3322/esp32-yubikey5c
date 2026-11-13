@@ -5,6 +5,15 @@ under [Releases](https://github.com/Felix3322/esp32-yubikey5c/releases). An
 independent free-software project, not affiliated with or endorsed by Yubico;
 "YubiKey" is a trademark of Yubico AB. 本项目是独立的自由软件，与 Yubico 无关。
 
+<img width="200" alt="image" src="https://github.com/user-attachments/assets/8a324bfc-95b1-425d-ac98-f1c5eb2d8513" />
+<img width="200" alt="image" src="https://github.com/user-attachments/assets/e1c9ce11-901e-4e6b-aa63-f909be476009" />
+<img width="200" alt="image" src="https://github.com/user-attachments/assets/8d599547-43ce-414f-b8b2-e6a1d5c33a68" />
+<img width="200" alt="image" src="https://github.com/user-attachments/assets/a70193a2-95d4-49bd-9b73-4d63648aa8cc" />
+<img width="200" alt="image" src="https://github.com/user-attachments/assets/f13eb281-abf2-4367-a469-18969c569c78" />
+<img width="200" alt="image" src="https://github.com/user-attachments/assets/2cf215bf-5ba4-4326-b270-f3da06c10c44" />
+<img width="200" alt="image" src="https://github.com/user-attachments/assets/321f6c75-252c-4109-bc1c-442af7c62e70" />
+<img width="200" alt="image" src="https://github.com/user-attachments/assets/aedd921e-5a4e-48b9-9863-7e9ed1e0eb56" />
+
 > I developed this for sharing OpenAI ChatGPT accounts (as access at daybreak began requiring a hardware security key); you can copy the AAGUID from the Yubico website, allowing the ESP32 to function like a genuine YubiKey.
 
 > **Security at a glance.** Every key is stored encrypted and authenticated
