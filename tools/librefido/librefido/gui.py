@@ -9,9 +9,11 @@ reconnect automatically.
 import locale
 import os
 import sys
+import threading
+import time
 import traceback
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
+from PySide6.QtCore import QEventLoop, QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
@@ -43,6 +45,9 @@ ZH = {
     "Health": "磁盘健康",
     "Refresh": "刷新",
     "No device": "未找到设备",
+    "Looking for the device...": "正在查找设备…",
+    "The device does not answer: unplug it, plug it in again and press Refresh.":
+        "设备没有响应：请拔下后重新插入，再点“刷新”。",
     "Firmware": "固件版本",
     "Build profile": "构建配置",
     "Chip serial": "芯片序列号",
@@ -442,7 +447,10 @@ class UnavailableTab(QWidget):
 # ----------------------------------------------------------------------------
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    # A reader whose card never answers must not freeze the window.
+    DISCOVERY_TIMEOUT = 10.0
+
+    def __init__(self, refresh=True):
         super().__init__()
         self.setWindowTitle("%s %s" % (T("LibreFido Manager"), __version__))
         self.resize(820, 600)
@@ -492,7 +500,8 @@ class MainWindow(QMainWindow):
         root.addWidget(warn)
         self.setCentralWidget(central)
         self.statusBar().showMessage(T("No device"))
-        self.refresh()
+        if refresh:
+            self.refresh()
 
     # -- tabs ----------------------------------------------------------------
     def _key_manager_tab(self):
@@ -795,36 +804,79 @@ class MainWindow(QMainWindow):
         if self.busy:
             self._turned_away()
             return
-        try:
-            devices = list_devices()
-        except Exception:
-            devices = []
-        current = self.reader_box.currentText()
+        want, old = self.reader_box.currentText(), self.mgmt
+
+        def discover():
+            try:
+                names = [r for r, _ in list_devices()]
+            except Exception:
+                names = []
+            reader = want if want in names else (names[0] if names else None)
+            if reader is None:
+                return names, None, None, None
+            try:
+                m = old
+                if m is None or m.card.reader != reader:
+                    if m:
+                        m.close()
+                    m = Management.open(reader)
+                # (no transaction: the window must not wait for another program's)
+                return names, reader, m, m.info(lock=False)
+            except Exception as e:
+                return names, reader, None, e
+
+        found = self._wait_for(discover, self.DISCOVERY_TIMEOUT)
+        if found is None:
+            # The search thread is left to its reader; old may be in its hands.
+            self.mgmt = None
+            self.statusBar().showMessage(T("The device does not answer: unplug it, plug it in again and press Refresh."))
+            self.keys_tab.show_info(None)
+            self.manager_tab.show_info(None)
+            return
+        names, reader, m, info = found
         self.reader_box.clear()
-        for reader, _ in devices:
-            self.reader_box.addItem(reader)
-        if current and self.reader_box.findText(current) >= 0:
-            self.reader_box.setCurrentText(current)
-        if not devices:
+        self.reader_box.addItems(names)
+        if reader:
+            self.reader_box.setCurrentText(reader)
+        if reader is None or isinstance(info, Exception):
             self.mgmt = None
-            self.statusBar().showMessage(T("No device"))
+            self.statusBar().showMessage(T("No device") if reader is None else str(info))
             self.keys_tab.show_info(None)
             self.manager_tab.show_info(None)
             return
+        self.mgmt, self.info = m, info
+        self._show_info(info)
+
+    def _wait_for(self, fn, timeout):
+        """fn() in a thread of its own while the window keeps handling events
+        (as busy: operations are turned away). Its result, or None when it
+        did not end within timeout seconds; a PC/SC call cannot be cancelled,
+        so such a thread is abandoned (daemon: it never holds up the exit)."""
+        box = {}
+        t = threading.Thread(target=lambda: box.setdefault("r", fn()), daemon=True)
+        loop = QEventLoop()
+        start = time.monotonic()
+
+        def poll():
+            if not t.is_alive() or time.monotonic() - start > timeout:
+                loop.quit()
+            elif time.monotonic() - start > 0.5 and self.banner.isHidden():
+                self.banner.setText(T("Looking for the device..."))
+                self.banner.setVisible(True)
+        timer = QTimer()
+        timer.timeout.connect(poll)
+        self.busy, self._quiet = True, True
         try:
-            if self.mgmt is None or self.mgmt.card.reader != self.reader_box.currentText():
-                if self.mgmt:
-                    self.mgmt.close()
-                self.mgmt = Management.open(self.reader_box.currentText())
-            # (no transaction: the GUI thread must not wait for another program's)
-            self.info = self.mgmt.info(lock=False)
-        except Exception as e:
-            self.mgmt = None
-            self.statusBar().showMessage(str(e))
-            self.keys_tab.show_info(None)
-            self.manager_tab.show_info(None)
-            return
-        self._show_info(self.info)
+            t.start()
+            t.join(0.05)
+            if t.is_alive():
+                timer.start(20)
+                loop.exec()
+        finally:
+            timer.stop()
+            self.busy = self._quiet = False
+            self.banner.setVisible(False)
+        return box.get("r")
 
     def _show_info(self, info):
         yn = lambda v: T("yes") if v else T("no")
@@ -1755,8 +1807,9 @@ class KeysTab(QWidget):
 
 def main():
     app = QApplication(sys.argv)
-    w = MainWindow()
+    w = MainWindow(refresh=False)
     w.show()
+    QTimer.singleShot(0, w.refresh)             # the window is up while the readers are searched
     sys.exit(app.exec())
 
 

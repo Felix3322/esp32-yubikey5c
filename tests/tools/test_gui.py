@@ -795,3 +795,50 @@ def test_keys_tab_texts_have_both_languages(monkeypatch):
     assert cli.key_entry_text("oath", {1: b"x", 2: 0x21, 3: 6, 4: 1}) == ("x", "TOTP SHA1, 6 digits, touch")
     assert cli.key_entry_text("otp", {1: b"\x02", 2: "chal-hmac", 3: True}) == ("slot 2", "chal-hmac, access code")
     assert cli.key_entry_text("otp", {1: b"\x02", 2: "chal-hmac", 3: True}, gui.T) == ("槽位 2", "chal-hmac，有访问码")
+
+
+def test_a_reader_that_never_answers_does_not_freeze_the_window(app, monkeypatch):
+    """A card that never answers (a broken firmware, issue #1): the window
+    keeps handling events while it searches, turns operations away, gives up
+    after DISCOVERY_TIMEOUT, and the next Refresh finds a device that answers."""
+    stuck = threading.Event()
+
+    def never_answers():
+        stuck.wait(30)
+        return []
+
+    monkeypatch.setattr(gui, "list_devices", lambda: [])
+    w = gui.MainWindow()
+    monkeypatch.setattr(gui.MainWindow, "DISCOVERY_TIMEOUT", 1.0)
+    monkeypatch.setattr(gui, "list_devices", never_answers)
+    seen = {}
+
+    def during():
+        seen.update(busy=w.busy, started=w._run(lambda p: None), banner=not w.banner.isHidden())
+    gui.QTimer.singleShot(700, during)
+    try:
+        t0 = time.monotonic()
+        w.refresh()
+        assert 1.0 <= time.monotonic() - t0 < 5
+        assert seen == {"busy": True, "started": False, "banner": True}
+        assert w.mgmt is None and not w.busy and w.banner.isHidden()
+        assert "does not answer" in w.statusBar().currentMessage()
+
+        dev = F.FakeDevice(stream=S.stream())
+        reader = F.management(dev, monkeypatch).card.reader
+        monkeypatch.setattr(gui, "list_devices", lambda: [(reader, b"")])
+        w.refresh()
+        assert w.mgmt is not None and w.info is not None
+    finally:
+        stuck.set()
+        w.close()
+
+
+def test_the_window_shows_before_the_first_search(app, monkeypatch):
+    called = []
+    monkeypatch.setattr(gui, "list_devices", lambda: called.append(1) or [])
+    w = gui.MainWindow(refresh=False)
+    assert not called and w.mgmt is None
+    w.refresh()
+    assert called
+    w.close()
