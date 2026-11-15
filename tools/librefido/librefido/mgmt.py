@@ -756,6 +756,10 @@ class Management:
         params = {1: len(image), 2: hashlib.sha256(image).digest()}
         with self.card.transaction(MGMT_AID):
             before = self.info()
+            dev_platform = (before.get("firmware_slot") or {}).get("platform")
+            if dev_platform and dev_platform != desc["platform"]:
+                raise ApduError(0x6A80, message="firmware update: this image is for %s, the device runs %s"
+                                                % (desc["platform"], dev_platform))
             old_slot = (before.get("firmware_slot") or {}).get("slot")
             if before.get("protocol", 1) >= 3 and (before.get("firmware_slot") or {}).get("unconfirmed"):
                 # The upload would overwrite the image a reset goes back to.

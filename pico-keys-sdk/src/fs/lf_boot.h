@@ -56,6 +56,8 @@ extern lf_boot_status_t lf_boot_status(void);
 extern const char *lf_boot_status_str(lf_boot_status_t s);
 /* True once a profile store is mounted read-write. */
 extern bool lf_storage_ready(void);
+/* True if a new profile can be made and still leave a spare store region. */
+extern bool lf_boot_room_for_profile(void);
 
 /* Index of the active profile (0..LF_MAX_PROFILES-1): the one mounted at
  * boot, or, once a switch was requested, the one the next boot mounts.

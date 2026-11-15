@@ -323,6 +323,11 @@ bool lf_store_is_formatted(uint8_t idx, uint8_t uuid[16]) {
     return true;
 }
 
+bool lf_store_region_fits(uint8_t idx) {
+    lf_region_t reg;
+    return lf_region_open(&reg, LF_REG_STORE(idx)) && reg.size >= soff(S_END);
+}
+
 bool lf_store_has_content(uint8_t idx) {
     lf_region_t reg;
     if (lf_store_is_formatted(idx, NULL)) {

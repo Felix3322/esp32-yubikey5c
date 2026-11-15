@@ -121,9 +121,9 @@ def test_unconfirmed_update_rolls_back_on_reset(pcscd, emulators):
     e = emulators()
     m = device(e)
     make_rk(b"alice")
-    m.update_firmware(image(e, (2, 1, 0)), confirm=False)
+    m.update_firmware(image(e, newer(e)), confirm=False)
     version, slot = fw(m)
-    assert version == "2.1.0" and slot["unconfirmed"]
+    assert version == vs(newer(e)) and slot["unconfirmed"]
     make_rk(b"bob")                                     # written by the new image
 
     e.stop(hard=True)                                   # never confirmed, e.g. the host crashed

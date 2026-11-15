@@ -10,7 +10,7 @@ MAGIC_INV = bytes(~c & 0xFF for c in MAGIC)
 DESC_FMT = "<8s8sBBB3sBBBB16s4s"
 DESC_SIZE = struct.calcsize(DESC_FMT)
 
-PLATFORMS = {0x01: "esp32s3", 0x7F: "emulation"}
+PLATFORMS = {0x01: "esp32s3", 0x02: "esp32s3-4mb", 0x7F: "emulation"}
 BUILD_PROFILES = {0: "development", 1: "standard", 2: "hardened"}
 SLOT_FACTORY = 0xFF
 

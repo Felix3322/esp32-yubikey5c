@@ -48,12 +48,22 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "lf_region.h"
+#if defined(ESP_PLATFORM)
+#include "sdkconfig.h"
+#endif
 
 /* On-flash layout of a profile store; other versions are never guessed. */
 #define LF_STORE_FORMAT_VERSION     1
 
+/* A 128-sector store region takes 1.34 MiB: 4 MB modules use 64 (0.75 MiB). */
+#ifndef LF_STORE_LOGICAL_SECTORS
+#if defined(CONFIG_ESPTOOLPY_FLASHSIZE_4MB)
+#define LF_STORE_LOGICAL_SECTORS    64
+#else
 #define LF_STORE_LOGICAL_SECTORS    128
-#define LF_STORE_LOGICAL_SIZE       (LF_STORE_LOGICAL_SECTORS * LF_SECTOR_SIZE)
+#endif
+#endif
+#define LF_STORE_LOGICAL_SIZE      (LF_STORE_LOGICAL_SECTORS * LF_SECTOR_SIZE)
 #define LF_STORE_MAX_DIRTY          8       /* sectors per transaction (RAM cache) */
 
 typedef struct {
@@ -87,6 +97,8 @@ extern bool lf_store_is_formatted(uint8_t idx, uint8_t uuid[16]);
 /* True if region idx holds anything of a store: a header, or what an erase
  * that was interrupted by firmware erasing the header first left behind. */
 extern bool lf_store_has_content(uint8_t idx);
+/* True if region idx exists in the partition table and can hold a store. */
+extern bool lf_store_region_fits(uint8_t idx);
 /* Erases the whole region (wiped or replaced profiles leave no remnants).
  * The header goes last, so an interrupted erase is finished at the next boot. */
 extern int lf_store_erase(uint8_t idx);

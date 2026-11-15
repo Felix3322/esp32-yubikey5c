@@ -42,7 +42,9 @@
 #endif
 
 #ifndef LF_BOARD_NAME
-#if defined(ESP_PLATFORM)
+#if defined(ESP_PLATFORM) && defined(CONFIG_ESPTOOLPY_FLASHSIZE_4MB)
+#define LF_BOARD_NAME   "esp32s3-4mb"
+#elif defined(ESP_PLATFORM)
 #define LF_BOARD_NAME   "esp32s3"
 #else
 #define LF_BOARD_NAME   "emulation"
@@ -54,7 +56,9 @@ __attribute__((used)) const lf_fw_desc_t lf_fw_desc = {
     .magic_inv = { (uint8_t) ~'L', (uint8_t) ~'F', (uint8_t) ~'F', (uint8_t) ~'W',
                    (uint8_t) ~'D', (uint8_t) ~'S', (uint8_t) ~'C', (uint8_t) ~'1' },
     .desc_version = LF_FW_DESC_VERSION,
-#if defined(ESP_PLATFORM)
+#if defined(ESP_PLATFORM) && defined(CONFIG_ESPTOOLPY_FLASHSIZE_4MB)
+    .platform = LF_FW_PLATFORM_ESP32S3_4MB,
+#elif defined(ESP_PLATFORM)
     .platform = LF_FW_PLATFORM_ESP32S3,
 #else
     .platform = LF_FW_PLATFORM_EMULATION,

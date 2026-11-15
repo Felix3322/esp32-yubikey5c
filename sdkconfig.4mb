@@ -1,0 +1,12 @@
+# Overlay on top of sdkconfig.defaults for 4 MB ESP32-S3 modules.
+# Build with:
+#   idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.4mb" ...
+# Everything else (rollback, -O2, no PSRAM, mbedTLS, stacks) stays as in
+# sdkconfig.defaults; only the flash size and partition table change.
+
+# CONFIG_ESPTOOLPY_FLASHSIZE_16MB is not set
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="config/esp32/partitions_librefido_4mb.csv"
+CONFIG_PARTITION_TABLE_FILENAME="config/esp32/partitions_librefido_4mb.csv"

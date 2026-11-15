@@ -105,7 +105,7 @@ def test_protocol_3_info_and_policies(monkeypatch):
     m = F.management(dev, monkeypatch)
     info = m.info()
     assert info["profiles"][0]["auto_presence"] == [] and info["profiles"][0]["secure"] is False
-    assert info["board"] == {"led_brightness": 255} and info["free_changes"] == 16
+    assert info["board"] == {"led_brightness": 255, "usb_custom": False} and info["free_changes"] == 16
     m.set_presence(0, fido=True, piv=True)
     assert dev.presence[0] == 0b10001
     m.set_presence(0, piv=False, oath=True)             # the others keep their setting

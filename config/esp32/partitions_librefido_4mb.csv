@@ -1,0 +1,26 @@
+# LibreFido 2 flash layout for ESP32-S3 modules with 4 MB flash.
+#
+# Built with sdkconfig.4mb: the profile stores then have 64 logical sectors
+# (256 KiB of key storage per profile) instead of 128, so a store region needs
+# 0xC1000 instead of 0x157000 (lf_store.c, S_END). There is room for two of
+# them: one profile plus the spare region that imports and wipes are built on.
+# A second profile is refused (6A84) rather than taking that spare.
+#
+#  ota_0 / ota_1  two firmware slots (A/B update with rollback)
+#  lfsys          system area: profile table, active profile, board settings
+#  lfstage        staging area for imports and exports
+#  lfr0 / lfr1    profile store + spare
+#
+# No part0: there is no room to migrate a store of firmware before LibreFido 2.
+# The firmware descriptor carries its own platform (0x02), so 4 MB and 16 MB
+# images never update each other.
+#
+# Name,     Type, SubType, Offset,    Size,      Flags
+nvs,        data, nvs,     0x9000,    0x5000,
+otadata,    data, ota,     0xe000,    0x2000,
+ota_0,      app,  ota_0,   0x10000,   0xd0000,
+ota_1,      app,  ota_1,   0xe0000,   0xd0000,
+lfsys,      0x40, 0x10,    0x1b0000,  0x10000,   encrypted
+lfstage,    0x40, 0x11,    0x1c0000,  0xbe000,   encrypted
+lfr0,       0x40, 0x20,    0x27e000,  0xc1000,   encrypted
+lfr1,       0x40, 0x21,    0x33f000,  0xc1000,   encrypted

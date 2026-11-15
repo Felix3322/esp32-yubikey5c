@@ -206,11 +206,22 @@ static bool region_used(uint8_t r) {
 /* A store region that backs no profile, or -1. */
 static int free_region(void) {
     for (uint8_t r = 0; r < LF_STORE_REGIONS; r++) {
-        if (!region_used(r)) {
+        if (!region_used(r) && lf_store_region_fits(r)) {
             return r;
         }
     }
     return -1;
+}
+
+/* A new profile must leave a spare region for later imports and wipes. */
+bool lf_boot_room_for_profile(void) {
+    uint8_t n = 0;
+    for (uint8_t r = 0; r < LF_STORE_REGIONS; r++) {
+        if (!region_used(r) && lf_store_region_fits(r)) {
+            n++;
+        }
+    }
+    return n >= 2;
 }
 
 /* Formats a free region for profile slot pidx and records it (not committed). */
@@ -499,7 +510,7 @@ static int apply_pending(void) {
             memcpy(uuid, info.hdr.uuid, sizeof(uuid));
         }
         region = free_region();
-        if (r == PICOKEY_OK && region < 0) {
+        if (r == PICOKEY_OK && (region < 0 || (old < 0 && !lf_boot_room_for_profile()))) {
             r = PICOKEY_ERR_NO_MEMORY;
         }
         if (r == PICOKEY_OK) {

@@ -157,7 +157,7 @@ def check_consistent(info, keystore=None, binding=True):
     (binding: the root key binding, which also needs a root key or a
     profile without one to record; otherwise locking debugging)."""
     s = state(info, keystore)
-    if s["platform"] != "esp32s3" and s["platform"] != "emulation":
+    if s["platform"] not in ("esp32s3", "esp32s3-4mb", "emulation"):
         raise ProvisionError("provisioning is for ESP32-S3 devices (this is %s)" % s["platform"])
     if s["boot_status"] != "ok":
         raise ProvisionError("the device booted in safe mode (%s): fix the storage first" % s["boot_status"])

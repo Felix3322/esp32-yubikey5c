@@ -455,7 +455,8 @@ static int cmd_profile_select(void) {
     }
     int r = lf_profile_select(idx);
     if (r != PICOKEY_OK) {
-        return r == PICOKEY_ERR_BLOCKED ? SW_CONDITIONS_NOT_SATISFIED() : SW_MEMORY_FAILURE();
+        return r == PICOKEY_ERR_BLOCKED ? SW_CONDITIONS_NOT_SATISFIED() :
+               r == PICOKEY_ERR_NO_MEMORY ? SW_FILE_FULL() : SW_MEMORY_FAILURE();
     }
     lf_reboot_later(300);
     return SW_OK();
@@ -617,6 +618,9 @@ static int cmd_profile_wipe_delete(void) {
     if (r == PICOKEY_ERR_BLOCKED) {
         return SW_CONDITIONS_NOT_SATISFIED();
     }
+    if (r == PICOKEY_ERR_NO_MEMORY) {
+        return SW_FILE_FULL();
+    }
     if (r != PICOKEY_OK) {
         return SW_MEMORY_FAILURE();
     }
@@ -652,6 +656,9 @@ static int cmd_profile_create_secure(void) {
     int r = lf_profile_create(idx, LF_PROFILE_F_NO_EXPORT | LF_PROFILE_F_SECURE);
     if (r == PICOKEY_ERR_BLOCKED) {
         return SW_CONDITIONS_NOT_SATISFIED();
+    }
+    if (r == PICOKEY_ERR_NO_MEMORY) {
+        return SW_FILE_FULL();
     }
     if (r != PICOKEY_OK) {
         return SW_MEMORY_FAILURE();
@@ -1110,7 +1117,8 @@ static int cmd_import_end(void) {
         r = lf_profile_request(LF_OP_IMPORT, import_target);
         if (r != PICOKEY_OK) {
             lf_stage_clear();
-            return r == PICOKEY_ERR_BLOCKED ? SW_CONDITIONS_NOT_SATISFIED() : SW_MEMORY_FAILURE();
+            return r == PICOKEY_ERR_BLOCKED ? SW_CONDITIONS_NOT_SATISFIED() :
+                   r == PICOKEY_ERR_NO_MEMORY ? SW_FILE_FULL() : SW_MEMORY_FAILURE();
         }
         lf_reboot_later(300);
     }

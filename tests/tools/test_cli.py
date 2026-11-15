@@ -236,8 +236,8 @@ def test_import_in_safe_mode_asks_for_no_passphrase(tmp_path, device, ask):
 
 def test_min_firmware_is_checked_against_the_device(tmp_path, device, ask, capsys):
     path = str(tmp_path / "new.lfbk")
-    write_file(path, S.stream(min_fw=(2, 2, 0)), "pw", scrypt_log_n=10)     # newer than this tool too
-    with pytest.raises(SystemExit, match="runs firmware 2.0.0; this backup needs 2.2.0"):
+    write_file(path, S.stream(min_fw=(2, 99, 0)), "pw", scrypt_log_n=10)    # newer than this tool too
+    with pytest.raises(SystemExit, match="runs firmware 2.0.0; this backup needs 2.99.0"):
         cli.main(["import", path, "--profile", "2"])
     assert not ask and not F.commands(device, mgmt.INS_IMPORT_BEGIN)
     ask.answers.append("pw")

@@ -39,10 +39,12 @@
 #include <stdint.h>
 
 #define LF_FW_VERSION_MAJOR     2
-#define LF_FW_VERSION_MINOR     1
-#define LF_FW_VERSION_PATCH     0
+#define LF_FW_VERSION_MINOR     2
+#define LF_FW_VERSION_PATCH     1
 
 #define LF_FW_PLATFORM_ESP32S3      0x01
+/* Own partition table and store size: never updated from or to 0x01 images. */
+#define LF_FW_PLATFORM_ESP32S3_4MB  0x02
 #define LF_FW_PLATFORM_EMULATION    0x7F
 
 #define LF_FW_DESC_VERSION      1

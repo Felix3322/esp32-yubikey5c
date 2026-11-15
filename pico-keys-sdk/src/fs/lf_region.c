@@ -274,6 +274,13 @@ static void fault_die(void) {
     _exit(99);
 }
 
+/* LF_EMU_STORE_REGIONS=n: only the first n store regions exist (4 MB layout: 2). */
+static uint8_t emu_store_regions(void) {
+    const char *s = getenv("LF_EMU_STORE_REGIONS");
+    int n = s && *s ? atoi(s) : LF_STORE_REGIONS;
+    return (uint8_t) (n < 1 || n > LF_STORE_REGIONS ? LF_STORE_REGIONS : n);
+}
+
 bool lf_region_open(lf_region_t *r, uint8_t id) {
     emu_open();
     memset(r, 0, sizeof(*r));
@@ -290,7 +297,7 @@ bool lf_region_open(lf_region_t *r, uint8_t id) {
         r->offset = EMU_STAGE_OFF;
         r->size = EMU_STAGE_SIZE;
     }
-    else if (id >= LF_REG_STORE0 && id < LF_REG_COUNT) {
+    else if (id >= LF_REG_STORE0 && id < LF_REG_STORE0 + emu_store_regions()) {
         r->offset = EMU_STORE_OFF + (uint32_t) (id - LF_REG_STORE0) * EMU_STORE_SIZE;
         r->size = EMU_STORE_SIZE;
     }

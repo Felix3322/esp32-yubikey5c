@@ -215,7 +215,7 @@ def test_records_written_unconfirmed_keep_the_earlier_format(pcscd, tmp_path):
         finally:
             card.close()
 
-        run_unconfirmed(e, (2, 1, 1))
+        run_unconfirmed(e, 2)
         card = Card()
         try:
             card.select(PIV_AID)

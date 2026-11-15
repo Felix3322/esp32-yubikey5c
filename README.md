@@ -90,10 +90,12 @@ YubiKey-compatible management, OATH and OTP protocols so that tools such as
 
 ## Quick start (ESP32-S3)
 
-Prebuilt firmware (ESP32-S3 with 16 MB flash) is attached to each
+Prebuilt firmware is attached to each
 [release](https://github.com/Felix3322/esp32-yubikey5c/releases): a full
 image for a new board, the application image for updates, and the separate
-parts. `SHA256SUMS` is signed with OpenPGP key `F16AE2D3CA9114AE`
+parts. `esp32s3` images are for 16 MB flash; `esp32s3-4mb` images are for
+4 MB modules (one profile, 256 KiB of key storage) and never update to or
+from the 16 MB ones. `SHA256SUMS` is signed with OpenPGP key `F16AE2D3CA9114AE`
 (Felix Liu); check it before flashing:
 
 ```bash
@@ -103,14 +105,16 @@ gpg --verify SHA256SUMS.asc SHA256SUMS && sha256sum -c --ignore-missing SHA256SU
 A new board (the whole image at 0x0; hold BOOT while plugging in):
 
 ```bash
-esptool --chip esp32s3 -p COM6 write-flash 0x0 librefido-2.1.0-esp32s3-standard-full.bin
+esptool --chip esp32s3 -p COM6 write-flash 0x0 librefido-2.2.1-esp32s3-standard-full.bin
+# 4 MB module:
+esptool --chip esp32s3 -p COM6 write-flash 0x0 librefido-2.2.1-esp32s3-4mb-standard-full.bin
 ```
 
 A board that already runs LibreFido 2 (A/B update, keys and settings kept,
 rollback possible):
 
 ```bash
-librefido firmware update librefido-2.1.0-esp32s3-standard-app.bin
+librefido firmware update librefido-2.2.1-esp32s3-standard-app.bin
 ```
 
 Build it yourself (ESP-IDF 5.5):

@@ -114,12 +114,13 @@ def plant(replace):
     with_management(run)
 
 
-def run_unconfirmed(e, version=(2, 1, 0)):
-    """Installs the emulator's own image as version 2.1.0 (or version)
-    without confirming it: the device runs firmware a reset would roll
-    back."""
+def run_unconfirmed(e, k=1):
+    """Installs the emulator's own image, k patch releases newer, without
+    confirming it: the device runs firmware a reset would roll back."""
     with open(e.binary, "rb") as f:
-        img = firmware.set_version(f.read(), version)
+        img = f.read()
+    v = firmware.parse(img)["version_tuple"]
+    img = firmware.set_version(img, (v[0], v[1], v[2] + k))
 
     def run(m):
         m.update_firmware(img, confirm=False)

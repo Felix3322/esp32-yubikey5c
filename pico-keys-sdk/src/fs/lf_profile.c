@@ -81,6 +81,9 @@ int lf_profile_select(uint8_t idx) {
     if (s->pending_op != LF_OP_NONE) {
         return PICOKEY_ERR_BLOCKED;
     }
+    if (!s->profile[idx].used && !lf_boot_room_for_profile()) {
+        return PICOKEY_ERR_NO_MEMORY;
+    }
     if (mounted < 0) {
         mounted = s->active;
     }
@@ -111,6 +114,9 @@ int lf_profile_create(uint8_t idx, uint8_t flags) {
     }
     if (s->pending_op != LF_OP_NONE) {
         return PICOKEY_ERR_BLOCKED;
+    }
+    if (!s->profile[idx].used && !lf_boot_room_for_profile()) {
+        return PICOKEY_ERR_NO_MEMORY;
     }
     uint8_t target = s->pending_profile;
     /* Recorded with the request, not on the slot: the boot applies them to
@@ -252,6 +258,9 @@ int lf_profile_request(uint8_t op, uint8_t idx) {
     }
     if (op == LF_OP_DELETE && !s->profile[idx].used) {
         return PICOKEY_ERR_FILE_NOT_FOUND;
+    }
+    if ((op == LF_OP_IMPORT || op == LF_OP_WIPE) && !s->profile[idx].used && !lf_boot_room_for_profile()) {
+        return PICOKEY_ERR_NO_MEMORY;
     }
     uint8_t target = s->pending_profile;
     s->pending_op = op;
