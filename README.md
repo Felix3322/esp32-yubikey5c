@@ -105,16 +105,25 @@ gpg --verify SHA256SUMS.asc SHA256SUMS && sha256sum -c --ignore-missing SHA256SU
 A new board (the whole image at 0x0; hold BOOT while plugging in):
 
 ```bash
-esptool --chip esp32s3 -p COM6 write-flash 0x0 librefido-2.2.1-esp32s3-standard-full.bin
+esptool --chip esp32s3 -p COM6 write-flash 0x0 librefido-2.2.2-esp32s3-standard-full.bin
 # 4 MB module:
-esptool --chip esp32s3 -p COM6 write-flash 0x0 librefido-2.2.1-esp32s3-4mb-standard-full.bin
+esptool --chip esp32s3 -p COM6 write-flash 0x0 librefido-2.2.2-esp32s3-4mb-standard-full.bin
+```
+
+Confirmations (imports, profile changes, updates, ...) wait 30 s for a press
+of the button on GPIO0, the BOOT button of ESP32-S3 dev boards. The status LED
+is a WS2812 on GPIO48 by default; if your board has it elsewhere, set the pin
+once and replug (GUI: Security → Board → LED pin):
+
+```bash
+librefido board --led-gpio 21    # Waveshare ESP32-S3-Zero
 ```
 
 A board that already runs LibreFido 2 (A/B update, keys and settings kept,
 rollback possible):
 
 ```bash
-librefido firmware update librefido-2.2.1-esp32s3-standard-app.bin
+librefido firmware update librefido-2.2.2-esp32s3-standard-app.bin
 ```
 
 Build it yourself (ESP-IDF 5.5):
