@@ -36,6 +36,7 @@
 #include "lf_store.h"
 #include "lf_sys.h"
 #include "random.h"
+#include "board_config.h"
 
 #if defined(ESP_PLATFORM)
 #include "esp_system.h"
@@ -272,8 +273,12 @@ static CborError encode_board(CborEncoder *map) {
     if (s->board_len > 0 && s->board_len <= LF_BOARD_MAX) {
         phy_unserialize_data(s->board, s->board_len, &rec);
     }
+    /* Key 5: the status LED pin used from the next start (the recorded one,
+     * else the build default); absent when the build has none. */
+    int led_gpio = rec.led_gpio_present && board_gpio_is_safe(rec.led_gpio) ? rec.led_gpio : BOARD_LED_GPIO;
+    bool led_known = led_gpio >= 0 && board_gpio_is_safe(led_gpio);
     e |= cbor_encode_uint(map, 17);
-    e |= cbor_encoder_create_map(map, &b, rec.vidpid_present ? 4 : 2);
+    e |= cbor_encoder_create_map(map, &b, (rec.vidpid_present ? 4 : 2) + (led_known ? 1 : 0));
     e |= cbor_encode_uint(&b, 1);
     e |= cbor_encode_uint(&b, rec.led_brightness_present ? rec.led_brightness : LED_BRIGHTNESS_FULL);
     /* The custom USB VID/PID of this device (shared by every profile): absent
@@ -287,6 +292,10 @@ static CborError encode_board(CborEncoder *map) {
     }
     e |= cbor_encode_uint(&b, 4);
     e |= cbor_encode_boolean(&b, rec.vidpid_present);
+    if (led_known) {
+        e |= cbor_encode_uint(&b, 5);
+        e |= cbor_encode_uint(&b, (uint64_t) led_gpio);
+    }
     e |= cbor_encoder_close_container(map, &b);
     return e;
 }
@@ -694,7 +703,9 @@ static int cmd_button_slots(void) {
 }
 
 /* Data: CBOR {1: LED brightness 0..255, 2: USB VID, 3: USB PID, 4: reset the
- * USB identity to the default (bool)}. Board settings are device wide and
+ * USB identity to the default (bool), 5: status LED GPIO, used from the next
+ * start (boards with their LED on another pin than the build's default)}.
+ * Board settings are device wide and
  * applied at once; written through phy_save() (only a real change, counted
  * against the free allowance). A custom VID/PID takes effect when the device
  * next enumerates (replug / restart). The VID and the PID are set together;
@@ -709,7 +720,7 @@ static int cmd_board_set(void) {
     }
     CborParser parser;
     CborValue map, it;
-    int brightness = -1;
+    int brightness = -1, led_gpio = -1;
     int64_t vid = -1, pid = -1;
     bool reset_usb = false;
     if (!mgmt_cbor_open(&parser, &map, &it)) {
@@ -750,6 +761,17 @@ static int cmd_board_set(void) {
             reset_usb = v;
             cbor_value_advance_fixed(&it);
         }
+        else if (k == 5) {
+            /* Never a pin the board needs for something else: USB, the
+             * flash/PSRAM bus, the presence button. */
+            uint64_t v = 0;
+            if (!cbor_value_is_unsigned_integer(&it) || cbor_value_get_uint64(&it, &v) != CborNoError ||
+                v > 255 || !board_gpio_is_safe((int) v) || (int) v == BOARD_UP_BUTTON_GPIO) {
+                return SW_INCORRECT_PARAMS();
+            }
+            led_gpio = (int) v;
+            cbor_value_advance_fixed(&it);
+        }
         else if (!mgmt_cbor_skip(&it)) {
             return SW_WRONG_DATA();
         }
@@ -765,13 +787,18 @@ static int cmd_board_set(void) {
     if (vid == 0) {
         return SW_INCORRECT_PARAMS();           /* VID 0 is not a USB identity */
     }
-    if (brightness < 0 && vid < 0 && !reset_usb) {
+    if (brightness < 0 && vid < 0 && !reset_usb && led_gpio < 0) {
         return SW_OK();                         /* nothing to change */
     }
     phy_ensure_loaded();
     if (brightness >= 0) {
         phy_data.led_brightness = (uint8_t) brightness;
         phy_data.led_brightness_present = true;
+    }
+    if (led_gpio >= 0) {
+        /* The LED driver reads it when the device starts. */
+        phy_data.led_gpio = (uint8_t) led_gpio;
+        phy_data.led_gpio_present = true;
     }
     if (reset_usb) {
         phy_data.vidpid_present = false;

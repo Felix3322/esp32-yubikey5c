@@ -60,6 +60,7 @@ class FakeDevice:
         self.secure = [False] * 4
         self.no_export = [False] * 4
         self.led = 255
+        self.led_gpio = 48              # status LED pin (firmware 2.2.2+; None: not reported)
         self.free_changes = 16
         self.hmac_key = False
         self.drk_source = 2             # flash (not bound to the chip)
@@ -104,7 +105,10 @@ class FakeDevice:
         if self.boot_status in (0, 3, 4):           # sys_usable(): the profiles are reported
             m.update({9: 0, 10: 2, 11: self.last_result, 12: 0, 13: False, 14: True, 15: profiles})
             if self.protocol >= 3:
-                m.update({17: {1: self.led}, 18: self.free_changes})
+                board = {1: self.led}
+                if self.led_gpio is not None:
+                    board[5] = self.led_gpio
+                m.update({17: board, 18: self.free_changes})
         enc = cbor.encode(m)
         if self.raw_name is not None:
             enc = enc.replace(b"Q" * len(self.raw_name), self.raw_name)
@@ -177,11 +181,17 @@ class FakeDevice:
             self.used[p1], self.secure[p1], self.no_export[p1], self.presence[p1] = True, True, True, 0
             return b"", 0x9000
         if ins == mgmt.INS_BOARD_SET:
-            v = cbor.decode(data).get(1)
+            req = cbor.decode(data)
+            v, gpio = req.get(1), req.get(5)
             if v is not None and not 0 <= v <= 255:
+                return b"", 0x6A80
+            if gpio is not None and (self.led_gpio is None or gpio in (0, 19, 20) or 22 <= gpio <= 37 or gpio > 48):
                 return b"", 0x6A80
             if v is not None and v != self.led:
                 self.led = v
+                self.free_changes = max(0, self.free_changes - 1)
+            if gpio is not None and gpio != self.led_gpio:
+                self.led_gpio = gpio
                 self.free_changes = max(0, self.free_changes - 1)
             return b"", 0x9000
         if ins == mgmt.INS_PROVISION:

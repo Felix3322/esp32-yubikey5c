@@ -359,6 +359,13 @@ def cmd_board(args):
             _change_hint(m, info)
             m.set_led_brightness(args.led_brightness)
             info = m.info()
+        if args.led_gpio is not None:
+            if not 0 <= args.led_gpio <= 48:
+                sys.exit("the LED GPIO must be 0..48")
+            _change_hint(m, info)
+            m.set_led_gpio(args.led_gpio)
+            print("LED pin changed; replug (or restart) the device for it to take effect", file=sys.stderr)
+            info = m.info()
         if args.reset_usb_id or args.vid is not None:
             _change_hint(m, info)
             try:
@@ -1276,6 +1283,9 @@ def main(argv=None):
 
     bd = sub.add_parser("board", help="board settings shared by all profiles")
     bd.add_argument("--led-brightness", type=int, metavar="N", help="0..255, applied at once")
+    bd.add_argument("--led-gpio", type=int, metavar="GPIO",
+                    help="pin of the status LED (WS2812), e.g. 21 for a Waveshare ESP32-S3-Zero; "
+                         "used from the next start")
     bd.add_argument("--vid", type=lambda s: int(s, 0), metavar="VID",
                     help="custom USB vendor ID (e.g. 0x1209); set with --pid")
     bd.add_argument("--pid", type=lambda s: int(s, 0), metavar="PID", help="custom USB product ID; set with --vid")

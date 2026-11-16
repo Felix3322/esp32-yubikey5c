@@ -32,7 +32,7 @@ from test_gui import No, Yes, app, window                       # noqa: E402
 FIXTURES = (app, window)        # test_gui's: the offscreen application and the main window on a simulated device
 QLineEdit, QComboBox, QPushButton = QtWidgets.QLineEdit, QtWidgets.QComboBox, QtWidgets.QPushButton
 T = gui_manager.ManagerContext(None, gui.T).T       # the pages' translation (the Key manager's tables first)
-TOUCH_BANNER = "Touch the key now (it blinks yellow)..."
+TOUCH_BANNER = gui.TOUCH_TEXT
 
 
 # ----------------------------------------------------------------------------

@@ -365,6 +365,35 @@ def test_security_tab_brightness(app, window):
     assert window._change_touch()
 
 
+def test_security_tab_led_gpio(app, window):
+    tab = protocol_3(window)
+    assert tab.led_gpio.value() == 48 and tab.led_gpio_btn.isEnabled()
+    tab.led_gpio.setValue(21)
+    tab._apply_led_gpio()
+    wait_idle(app, window)
+    assert window.dev.led_gpio == 21 and window.info["board"]["led_gpio"] == 21
+    assert app.messages[-1][0] == "information" and "21" in app.messages[-1][1]
+    window.dev.led_gpio = None                          # firmware before 2.2.2: no such setting
+    window.refresh()
+    assert not tab.led_gpio_btn.isEnabled()
+
+
+def test_touch_banner_names_the_button(app, window):
+    started = threading.Event()
+    release = threading.Event()
+
+    def op(progress):
+        started.set()
+        release.wait(5)
+    window._run(op, touch=True)
+    started.wait(5)
+    app.processEvents()
+    text = window.banner.text()
+    release.set()
+    wait_idle(app, window)
+    assert "BOOT" in text and "30" in text
+
+
 def test_safe_mode_does_not_crash_the_profile_buttons(app, window):
     window.dev.boot_status = 2                          # system area unreadable: no profiles
     window.info = window.mgmt.info()

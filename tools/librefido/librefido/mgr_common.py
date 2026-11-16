@@ -105,8 +105,9 @@ SW_TEXT = {
              "安全状态不满足（缺少 PIN、密码或密钥，或其不正确）"),
     0x6983: ("blocked after too many wrong attempts", "错误次数过多，已锁定"),
     0x6984: ("wrong data or password", "数据或密码错误"),
-    0x6985: ("not confirmed: touch the key when it blinks (or the key store is locked, or another operation "
-             "is pending)", "未确认：请在按键闪烁时触摸它（或密钥存储已锁定，或有其他操作未完成）"),
+    0x6985: ("not confirmed: press the button on the key (BOOT on ESP32-S3 dev boards) within 30 s (or the key "
+             "store is locked, or another operation is pending)",
+             "未确认：请在 30 秒内按一下设备上的按键（ESP32-S3 开发板是 BOOT 键）（或密钥存储已锁定，或有其他操作未完成）"),
     0x6986: ("not allowed by this profile or build", "此环境或固件构建不允许此操作"),
     0x6A80: ("the device refused the data as invalid", "设备认为数据无效"),
     0x6A81: ("not supported by this device or firmware", "此设备或固件不支持"),

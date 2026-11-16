@@ -758,7 +758,7 @@ def test_key_export_refusals(tmp_path, kdev, capsys, pw):
     with pytest.raises(SystemExit, match="no such key on the device"):
         export("otp:hex:02")
     kdev.refuse[mgmt.INS_KEY_EXPORT] = 0x6985
-    with pytest.raises(SystemExit, match="not confirmed: touch the key"):
+    with pytest.raises(SystemExit, match="not confirmed: press the button on the key"):
         export("otp:hex:01")
     kdev.masks = {1: 0b00001, 2: 0}
     with pytest.raises(SystemExit, match="refused: the firmware of this device cannot export piv keys"):

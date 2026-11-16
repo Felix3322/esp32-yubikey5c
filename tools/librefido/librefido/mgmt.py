@@ -286,6 +286,8 @@ class Management:
             board = {"led_brightness": b17.get(1), "usb_custom": bool(b17.get(4))}
             if 2 in b17 and 3 in b17:          # the custom USB identity, when set
                 board["vid"], board["pid"] = b17[2], b17[3]
+            if 5 in b17:                        # firmware 2.2.2+: status LED pin (from the next start)
+                board["led_gpio"] = b17[5]
             out["board"] = board
         if 18 in m:
             out["free_changes"] = m[18]     # changes without a touch left (names, colours, board, ...)
@@ -455,6 +457,16 @@ class Management:
         """LED brightness 0..255 (device wide, applied at once; a touch once
         the free changes are used up)."""
         self._cmd(INS_BOARD_SET, data=cbor.encode({1: value}), what="LED brightness")
+
+    def set_led_gpio(self, gpio):
+        """GPIO of the status LED (WS2812-type RGB LED), for boards that have
+        it on another pin than the build's default (ESP32-S3-DevKitC-1: 48,
+        Waveshare ESP32-S3-Zero: 21). Device wide, used from the next start;
+        a touch once the free changes are used up. The device refuses pins
+        it needs for USB, flash/PSRAM or the presence button (6a80)."""
+        if not 0 <= gpio <= 255:
+            raise ValueError("GPIO must be 0..255")
+        self._cmd(INS_BOARD_SET, data=cbor.encode({5: gpio}), what="LED GPIO")
 
     def set_usb_vidpid(self, vid, pid):
         """The USB VID and PID this device reports from now on (device wide;

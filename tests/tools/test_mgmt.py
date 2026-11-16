@@ -105,7 +105,8 @@ def test_protocol_3_info_and_policies(monkeypatch):
     m = F.management(dev, monkeypatch)
     info = m.info()
     assert info["profiles"][0]["auto_presence"] == [] and info["profiles"][0]["secure"] is False
-    assert info["board"] == {"led_brightness": 255, "usb_custom": False} and info["free_changes"] == 16
+    assert info["board"] == {"led_brightness": 255, "usb_custom": False, "led_gpio": 48}
+    assert info["free_changes"] == 16
     m.set_presence(0, fido=True, piv=True)
     assert dev.presence[0] == 0b10001
     m.set_presence(0, piv=False, oath=True)             # the others keep their setting
@@ -117,6 +118,13 @@ def test_protocol_3_info_and_policies(monkeypatch):
     with pytest.raises(ApduError) as e:
         m.set_led_brightness(300)
     assert e.value.sw == 0x6A80
+    m.set_led_gpio(21)                                  # Waveshare ESP32-S3-Zero
+    assert m.info()["board"]["led_gpio"] == 21 and dev.led_gpio == 21
+    with pytest.raises(ApduError) as e:
+        m.set_led_gpio(0)                               # the presence button
+    assert e.value.sw == 0x6A80
+    with pytest.raises(ValueError):
+        m.set_led_gpio(-1)
     with pytest.raises(ApduError) as e:
         m.create_secure_profile(1)                      # the root key is not bound yet
     assert e.value.sw == 0x6982

@@ -20,7 +20,7 @@ librefido --help
 | `librefido profile select/set/wipe/delete/slots N` | the profile number (or for `slots` the count) is required; `--name` holds 23 bytes of UTF-8 |
 | `librefido profile create-secure N [--yes]` | a new, empty secure profile in slot N (touch; asks first when the slot is in use) |
 | `librefido presence N [--fido/--no-fido] [--oath/--no-oath] [--otp/--no-otp] [--openpgp/--no-openpgp] [--piv/--no-piv] [--all/--no-all]` | automatic presence per application ("my device is safe"); without options it shows the setting |
-| `librefido board [--led-brightness N]` | board settings shared by all profiles (LED brightness 0..255, applied at once) |
+| `librefido board [--led-brightness N] [--led-gpio N]` | board settings shared by all profiles (LED brightness 0..255, applied at once; status LED pin, e.g. 21 for a Waveshare ESP32-S3-Zero, used from the next start) |
 | `librefido export FILE [--no-encrypt] [--pin \| --pin-file F \| --no-pin] [--passphrase-file F]` | back up the active profile (touch, FIDO PIN if set); encrypted with a passphrase unless `--no-encrypt` (an empty passphrase is refused) |
 | `librefido verify FILE [--device] [--restore-test]` | check a backup without importing it: offline, on the device, or by a full restore into scratch space |
 | `librefido import FILE --profile N [--allow-unencrypted] [--pin \| --pin-file F \| --no-pin]` | restore or clone a backup into a profile slot; an unencrypted backup is refused without `--allow-unencrypted` |

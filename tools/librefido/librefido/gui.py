@@ -37,6 +37,10 @@ from .pcsc import ApduError, list_devices
 # Texts (English keys, Chinese translation chosen from the system locale)
 # ----------------------------------------------------------------------------
 
+# While the device waits for a press (the status LED may not be wired on every
+# board: the text names the button).
+TOUCH_TEXT = "Press the button on the key within 30 s (BOOT on ESP32-S3 dev boards)..."
+
 ZH = {
     "LibreFido Manager": "LibreFido 管理器",
     "Device": "设备",
@@ -97,10 +101,11 @@ ZH = {
     "Target slot": "目标槽位",
     "Import...": "导入…",
     "Scrub now": "立即全盘校验",
-    "Touch the key now (it blinks yellow)...": "请触摸按键（黄灯闪烁）…",
+    TOUCH_TEXT: "请在 30 秒内按一下设备上的按键（ESP32-S3 开发板是 BOOT 键）…",
     "Working...": "处理中…",
     "Busy with work in the background...": "正在后台处理…",
-    "If the key blinks, touch it to list the keys...": "如按键闪烁，请触摸以列出密钥…",
+    "If the key waits for it, press its button (BOOT) to list the keys...":
+        "如设备在等待确认，请按一下按键（BOOT 键）以列出密钥…",
     "Done": "完成",
     "Error": "错误",
     "The device restarts...": "设备正在重启…",
@@ -719,7 +724,7 @@ class MainWindow(QMainWindow):
             return False
         self.busy, self._quiet = True, quiet
         if not quiet:
-            self.banner.setText(banner or (T("Touch the key now (it blinks yellow)...") if touch else
+            self.banner.setText(banner or (T(TOUCH_TEXT) if touch else
                                            T("Working...")))
             self.banner.setVisible(True)
             self.progress.setVisible(False)
@@ -1452,7 +1457,7 @@ class KeysTab(QWidget):
             # The device never lists more than the application gives out
             # without its secret: FIDO without the PIN, OATH with a password.
             touch = any(w.mgmt.list_needs_touch(a, pin) for a in APPS if only in (None, a))
-            return T("If the key blinks, touch it to list the keys...") if touch else None
+            return T("If the key waits for it, press its button (BOOT) to list the keys...") if touch else None
         w._run_pin(listing, pin, False, then=lambda r: self._show(identity, *r), touch=False, banner=banner)
 
     def refresh_with_pin(self):

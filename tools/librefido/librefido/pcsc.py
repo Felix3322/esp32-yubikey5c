@@ -21,7 +21,8 @@ SW_MESSAGES = {
     0x6982: "security status not satisfied",
     0x6983: "PIN blocked",
     0x6984: "data invalid (backup rejected by the device)",
-    0x6985: "conditions not satisfied (touch the key when it blinks, or finish the pending operation)",
+    0x6985: "conditions not satisfied (press the button on the key, BOOT on ESP32-S3 dev boards, within 30 s; "
+            "or finish the pending operation)",
     0x6986: "not allowed (by this profile, e.g. a secure one, or this build)",
     0x6A80: "incorrect parameters",
     0x6A81: "not supported by this device",

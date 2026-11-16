@@ -7,6 +7,7 @@ import pytest
 from harness.emulator import Emulator, Pcscd
 from harness import ctaphid
 from librefido.mgmt import Management
+from librefido.pcsc import ApduError
 
 
 @pytest.fixture(scope="module")
@@ -45,6 +46,24 @@ def test_usb_vidpid_is_default_then_custom_then_reset(pcscd, tmp_path):
         m.reset_usb_vidpid()
         board = m.info()["board"]
         assert board["usb_custom"] is False and "vid" not in board
+    finally:
+        e.stop()
+
+
+def test_led_gpio_is_stored_and_refuses_bad_pins(pcscd, tmp_path):
+    e = Emulator(workdir=str(tmp_path / "dev"))
+    try:
+        m = device(e)
+        assert "led_gpio" not in m.info()["board"]      # the emulator build has no LED pin
+        m.set_led_gpio(21)
+        assert m.info()["board"]["led_gpio"] == 21
+        m.reboot()
+        m.reconnect(timeout=20)
+        assert m.info()["board"]["led_gpio"] == 21
+        with pytest.raises(ApduError) as err:
+            m.set_led_gpio(64)                          # not a pin of this board
+        assert err.value.sw == 0x6A80
+        assert m.info()["board"]["led_gpio"] == 21
     finally:
         e.stop()
 

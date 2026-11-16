@@ -10,7 +10,7 @@ import os
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QSlider, QVBoxLayout, QWidget,
+    QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from . import policy, provision
@@ -56,6 +56,9 @@ ZH = {
     "Create a secure profile in slot %d?": "在槽位 %d 中创建安全环境？",
     "Board": "板级设置",
     "LED brightness": "LED 亮度",
+    "LED pin (GPIO)": "状态灯引脚（GPIO）",
+    "led-gpio-hint": "从下次插入起生效。ESP32-S3-DevKitC-1：48，微雪 ESP32-S3-Zero：21（WS2812 类 RGB 灯）。",
+    "LED pin set to GPIO %d. Replug the key for it to take effect.": "状态灯引脚已设为 GPIO %d。重新插拔设备后生效。",
     "AAGUID": "AAGUID",
     "Firmware default": "固件默认值",
     "Custom...": "自定义…",
@@ -97,6 +100,8 @@ EN = {
                      "you noticing. Switching it on needs a touch; switching it off does not. Resets, exports, "
                      "imports and firmware updates always need a touch."),
     "not-available-secure": "A secure profile always needs a touch.",
+    "led-gpio-hint": ("Used from the next start. ESP32-S3-DevKitC-1: 48, Waveshare ESP32-S3-Zero: 21 "
+                      "(WS2812-type RGB LED)."),
     "secure-info": ("A secure profile is made empty on the device, is never imported into and never exported, "
                     "and every presence needs a touch.\nThe root key must be bound to the chip first. What the "
                     "slot holds now is erased."),
@@ -211,6 +216,19 @@ class SecurityTab(QWidget):
         row.addWidget(self.bright, 1)
         row.addWidget(self.bright_value)
         bl.addRow(T("LED brightness") + ":", row)
+        grow = QHBoxLayout()
+        self.led_gpio = QSpinBox()
+        self.led_gpio.setRange(0, 48)
+        self.led_gpio.setValue(48)
+        grow.addWidget(self.led_gpio)
+        self.led_gpio_btn = QPushButton(T("Set"))
+        self.led_gpio_btn.clicked.connect(self._apply_led_gpio)
+        grow.addWidget(self.led_gpio_btn)
+        grow.addStretch(1)
+        bl.addRow(T("LED pin (GPIO)") + ":", grow)
+        hint = QLabel(T("led-gpio-hint"))
+        hint.setWordWrap(True)
+        bl.addRow(hint)
         lay.addWidget(board)
         lay.addStretch(1)
 
@@ -231,6 +249,11 @@ class SecurityTab(QWidget):
             self.bright_value.setText(str(board["led_brightness"]))
             self.bright.blockSignals(False)
         self.bright.setEnabled("led_brightness" in board)
+        if "led_gpio" in board:
+            self.led_gpio.setValue(board["led_gpio"])
+        # firmware before 2.2.2 reports no pin (and has no such setting)
+        self.led_gpio.setEnabled("led_gpio" in board)
+        self.led_gpio_btn.setEnabled("led_gpio" in board)
         profiles = info.get("profiles") or []
         hardened = info.get("build_profile") == "hardened"
         self.create_btn.setEnabled(bool(profiles) and not hardened)
@@ -343,6 +366,16 @@ class SecurityTab(QWidget):
             return
         v = self.bright.value()
         self.w._run(lambda p: self.w.mgmt.set_led_brightness(v), touch=self.w._change_touch(), refresh=True)
+
+    def _apply_led_gpio(self):
+        if not self.w._ready():
+            return
+        v = self.led_gpio.value()
+
+        def done(_):
+            QMessageBox.information(self, self.T("Board"),
+                                    self.T("LED pin set to GPIO %d. Replug the key for it to take effect.") % v)
+        self.w._run(lambda p: self.w.mgmt.set_led_gpio(v), then=done, touch=self.w._change_touch(), refresh=True)
 
     def _aaguid_combo_changed(self, _index):
         self.aaguid_edit.setEnabled(self.aaguid_combo.isEnabled() and self.aaguid_combo.currentData() == "custom")

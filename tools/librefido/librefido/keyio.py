@@ -61,8 +61,8 @@ _SW_TEXT = {
     0x6982: "a PIN, password or key is missing or wrong, or the device cannot check it now",
     0x6983: "blocked after too many wrong attempts",
     0x6984: "wrong password or data",
-    0x6985: "not confirmed: touch the key when it blinks (or the key store is locked, or an operation is "
-            "pending)",
+    0x6985: "not confirmed: press the button on the key (BOOT on ESP32-S3 dev boards) within 30 s (or the key "
+            "store is locked, or an operation is pending)",
     0x6986: "not allowed by this profile or build",
     0x6A80: "the device refused the data as invalid",
     0x6A81: "not supported by this device or firmware",
