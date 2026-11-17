@@ -314,9 +314,9 @@ def test_certificate_and_request_assembly(algo, make, tmp_path):
     cert = x509.load_der_x509_certificate(der)
     cert.verify_directly_issued_by(cert)            # self-signed, by the card key
     assert cert.subject.rfc4514_string() == "CN=Card Key,O=LibreFido" and cert.serial_number == 12345
-    assert cert.not_valid_before_utc == now and cert.not_valid_after_utc == now + datetime.timedelta(days=365)
     assert stdformats._spki(cert.public_key()) == stdformats._spki(pub)
-    info = mgr_piv.certificate_info(der, pub)
+    info = mgr_piv.certificate_info(der, pub)       # aware UTC times with cryptography 41 too
+    assert info["not_before"] == now and info["not_after"] == now + datetime.timedelta(days=365)
     assert info["matches_key"] is True and info["subject"] == "CN=Card Key,O=LibreFido" and info["serial"] == "3039"
 
     info, req_alg = mgr_piv.csr_info(pub, algo, "CN=Request")

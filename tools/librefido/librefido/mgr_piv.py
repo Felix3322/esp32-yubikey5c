@@ -247,6 +247,12 @@ def parse_subject(subject):
                        "主题 %r 无法使用（%s）" % (display_name(text), e)) from None
     if not list(name):
         raise _err("the subject is empty", "主题为空")
+    # cryptography 42+ refuses these itself, 41 does not.
+    for attr in name:
+        if not attr.value or (attr.oid == NameOID.COMMON_NAME and len(attr.value) > 64):
+            raise _err("the subject %r cannot be used (empty value, or a common name over 64 characters)"
+                       % display_name(name.rfc4514_string()),
+                       "主题 %r 无法使用（值为空，或通用名超过 64 个字符）" % display_name(name.rfc4514_string()))
     return name
 
 
@@ -401,6 +407,13 @@ def assemble_signed(tbs, sig_alg, signature):
     return _der(0x30, bytes(tbs) + bytes(sig_alg) + _der(0x03, b"\x00" + bytes(signature)))
 
 
+def _utc_time(cert, name):
+    """cert.<name>_utc (cryptography 42+), or the naive <name> of older
+    versions as an aware UTC datetime."""
+    t = getattr(cert, name + "_utc", None)
+    return t if t is not None else getattr(cert, name).replace(tzinfo=datetime.timezone.utc)
+
+
 def certificate_info(der, public_key=None):
     """{subject, issuer, serial (hex), not_before, not_after (aware
     datetimes), pem, matches_key (bool, None without public_key), error
@@ -412,7 +425,7 @@ def certificate_info(der, public_key=None):
         info = {"subject": display_name(c.subject.rfc4514_string()),
                 "issuer": display_name(c.issuer.rfc4514_string()),
                 "serial": "%X" % c.serial_number,
-                "not_before": c.not_valid_before_utc, "not_after": c.not_valid_after_utc,
+                "not_before": _utc_time(c, "not_valid_before"), "not_after": _utc_time(c, "not_valid_after"),
                 "pem": c.public_bytes(serialization.Encoding.PEM).decode("ascii"),
                 "matches_key": None, "error": None}
         if public_key is not None:
