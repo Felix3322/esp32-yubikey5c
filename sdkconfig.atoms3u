@@ -1,0 +1,5 @@
+# Button wiring only; append after the flash-layout defaults.
+# M5Stack AtomS3U: https://docs.m5stack.com/en/homeassistant/devices/atoms3u
+CONFIG_LIBREFIDO_UP_BUTTON_GPIO=41
+# CONFIG_LIBREFIDO_UP_BUTTON_ACTIVE_HIGH is not set
+CONFIG_LIBREFIDO_UP_BUTTON_PULL_UP=y

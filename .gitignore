@@ -40,6 +40,7 @@ compile_commands.json
 # ESP-IDF
 sdkconfig
 sdkconfig.old
+sdkconfig.*.generated
 managed_components/
 dependencies.lock
 

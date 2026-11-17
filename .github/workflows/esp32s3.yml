@@ -9,11 +9,17 @@ on:
 
 jobs:
   firmware:
-    name: Firmware (${{ matrix.profile }})
+    name: Firmware (${{ matrix.board }}, ${{ matrix.profile }})
     strategy:
       fail-fast: false
       matrix:
         profile: [ development, standard, hardened ]
+        board: [ esp32s3 ]
+        include:
+          - profile: standard
+            board: atoms3u
+            defaults: sdkconfig.defaults;sdkconfig.4mb;sdkconfig.atoms3u
+            platform: esp32s3-4mb
     runs-on: ubuntu-latest
     container: espressif/idf:v5.5.1
     steps:
@@ -25,8 +31,8 @@ jobs:
         shell: bash
         run: |
           . $IDF_PATH/export.sh
-          idf.py -B build-${{ matrix.profile }} -DLIBREFIDO_PROFILE=${{ matrix.profile }} set-target esp32s3
-          idf.py -B build-${{ matrix.profile }} -DLIBREFIDO_PROFILE=${{ matrix.profile }} build
+          idf.py -B build-${{ matrix.profile }} -DSDKCONFIG_DEFAULTS="${{ matrix.defaults || 'sdkconfig.defaults' }}" -DLIBREFIDO_PROFILE=${{ matrix.profile }} set-target esp32s3
+          idf.py -B build-${{ matrix.profile }} -DSDKCONFIG_DEFAULTS="${{ matrix.defaults || 'sdkconfig.defaults' }}" -DLIBREFIDO_PROFILE=${{ matrix.profile }} build
 
       - name: Firmware descriptor
         shell: bash
@@ -37,12 +43,17 @@ jobs:
           from librefido import firmware
           d = firmware.parse(open("build-${{ matrix.profile }}/pico_fido2.bin", "rb").read())
           print(d)
-          assert d["platform"] == "esp32s3" and d["build_profile"] == "${{ matrix.profile }}"
+          assert d["platform"] == "${{ matrix.platform || 'esp32s3' }}" and d["build_profile"] == "${{ matrix.profile }}"
+          config = open("build-${{ matrix.profile }}/config/sdkconfig.h").read()
+          gpio = 41 if "${{ matrix.board }}" == "atoms3u" else 0
+          assert f"#define CONFIG_LIBREFIDO_UP_BUTTON_GPIO {gpio}\n" in config
+          assert "#define CONFIG_LIBREFIDO_UP_BUTTON_ACTIVE_HIGH " not in config
+          assert "#define CONFIG_LIBREFIDO_UP_BUTTON_PULL_UP 1\n" in config
           EOF
 
       - uses: actions/upload-artifact@v4
         with:
-          name: librefido-esp32s3-${{ matrix.profile }}
+          name: librefido-${{ matrix.board }}-${{ matrix.profile }}
           path: |
             build-${{ matrix.profile }}/bootloader/bootloader.bin
             build-${{ matrix.profile }}/partition_table/partition-table.bin
@@ -67,7 +78,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build pcscd libpcsclite-dev vsmartcard-vpcd swig opensc gnupg scdaemon
           python3 -m venv .venv
-          .venv/bin/pip install pytest pyscard fido2 cryptography yubikey-manager reedsolo PySide6
+          .venv/bin/pip install pytest kconfiglib pyscard fido2 cryptography yubikey-manager reedsolo PySide6
 
       - name: Build emulators
         run: |

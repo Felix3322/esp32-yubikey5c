@@ -40,7 +40,7 @@
 
 #define LF_FW_VERSION_MAJOR     2
 #define LF_FW_VERSION_MINOR     2
-#define LF_FW_VERSION_PATCH     2
+#define LF_FW_VERSION_PATCH     4
 
 #define LF_FW_PLATFORM_ESP32S3      0x01
 /* Own partition table and store size: never updated from or to 0x01 images. */

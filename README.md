@@ -95,19 +95,24 @@ Prebuilt firmware is attached to each
 image for a new board, the application image for updates, and the separate
 parts. `esp32s3` images are for 16 MB flash; `esp32s3-4mb` images are for
 4 MB modules (one profile, 256 KiB of key storage) and never update to or
-from the 16 MB ones. `SHA256SUMS` is signed with OpenPGP key `F16AE2D3CA9114AE`
-(Felix Liu); check it before flashing:
+from the 16 MB ones. AtomS3U needs the dedicated `atoms3u-4mb` image (GPIO41).
+Check `SHA256SUMS` before flashing. If `SHA256SUMS.asc` is attached, also
+verify its OpenPGP signature (key `F16AE2D3CA9114AE`, Felix Liu):
 
 ```bash
-gpg --verify SHA256SUMS.asc SHA256SUMS && sha256sum -c --ignore-missing SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
+# When the signature file is attached:
+gpg --verify SHA256SUMS.asc SHA256SUMS
 ```
 
 A new board (the whole image at 0x0; hold BOOT while plugging in):
 
 ```bash
-esptool --chip esp32s3 -p COM6 write-flash 0x0 librefido-2.2.2-esp32s3-standard-full.bin
+esptool --chip esp32s3 -p COM6 write-flash 0x0 librefido-2.2.4-esp32s3-standard-full.bin
 # 4 MB module:
 esptool --chip esp32s3 -p COM6 write-flash 0x0 librefido-2.2.2-esp32s3-4mb-standard-full.bin
+# AtomS3U (8 MB hardware, existing 4 MB layout, GPIO41):
+esptool --chip esp32s3 -p COM6 write-flash --flash-size 4MB 0x0 librefido-2.2.4-atoms3u-4mb-standard-full.bin
 ```
 
 Confirmations (imports, profile changes, updates, ...) wait 30 s for a press
@@ -123,7 +128,7 @@ A board that already runs LibreFido 2 (A/B update, keys and settings kept,
 rollback possible):
 
 ```bash
-librefido firmware update librefido-2.2.2-esp32s3-standard-app.bin
+librefido firmware update librefido-2.2.4-esp32s3-standard-app.bin
 ```
 
 Build it yourself (ESP-IDF 5.5):
@@ -133,6 +138,28 @@ git clone --recursive https://github.com/Felix3322/esp32-yubikey5c librefido && 
 idf.py set-target esp32s3
 idf.py build
 ```
+
+For **M5Stack AtomS3U**, the [user button is GPIO41, active
+low](https://docs.m5stack.com/en/homeassistant/devices/atoms3u), rather than
+GPIO0. Build with the `sdkconfig.atoms3u` button overlay and the existing
+4 MB layout, which fits its 8 MB flash:
+
+```bash
+idf.py -B build/atoms3u -DSDKCONFIG=sdkconfig.atoms3u.generated \
+  -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.4mb;sdkconfig.atoms3u" \
+  -DLIBREFIDO_PROFILE=standard -DIDF_TARGET=esp32s3 build
+```
+
+Start without an existing `sdkconfig.atoms3u.generated` when selecting these
+defaults: ESP-IDF keeps values already saved in a configuration. Generic
+builds still use GPIO0; the AtomS3U overlay only changes button wiring (low
+when pressed, with a pull-up), not presence enforcement or the flash layout.
+The default 16 MB image does not fit AtomS3U: its partition table extends
+beyond 8 MB. This is separate from the button mapping. The 4 MB layout uses
+one profile and 256 KiB of key storage; a native 8 MB layout is not provided.
+This configuration still needs AtomS3U hardware verification of WebAuthn
+registration and authentication with a physical press.
+Use `build/atoms3u` instead of `build` in the commands below for this build.
 
 Flash (first time; the board's USB port, hold BOOT while plugging in if the
 board does not enter the loader by itself):

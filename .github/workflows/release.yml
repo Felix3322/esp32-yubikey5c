@@ -1,0 +1,156 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: [pico-keys-sdk/src/fs/lf_fw.h]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: librefido-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version and existing release
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(python3 - <<'PY'
+          import pathlib, re, tomllib
+          header = pathlib.Path("pico-keys-sdk/src/fs/lf_fw.h").read_text()
+          version = ".".join(re.search(r"#define LF_FW_VERSION_" + part + r"\s+(\d+)", header)[1] for part in ("MAJOR", "MINOR", "PATCH"))
+          assert tomllib.loads(pathlib.Path("tools/librefido/pyproject.toml").read_text())["project"]["version"] == version
+          assert f'__version__ = "{version}"' in pathlib.Path("tools/librefido/librefido/__init__.py").read_text()
+          assert pathlib.Path(f"docs/releases/{version}.md").is_file()
+          print(version)
+          PY
+          )
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if gh release view "v$VERSION" --json isDraft --jq '.isDraft' > existing-release.txt; then
+            if [ "$(cat existing-release.txt)" = "false" ]; then
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            test "$(gh release view "v$VERSION" --json targetCommitish --jq '.targetCommitish')" = "$GITHUB_SHA"
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
+  button-tests:
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install pytest kconfiglib
+      - run: python -m pytest -q tests/unit/test_up_button.py
+
+  firmware:
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [esp32s3, atoms3u-4mb]
+        profile: [standard, hardened]
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.5.1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Build and validate firmware
+        shell: bash
+        env:
+          BOARD: ${{ matrix.board }}
+          PROFILE: ${{ matrix.profile }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          . "$IDF_PATH/export.sh"
+          DEFAULTS=sdkconfig.defaults
+          if [ "$BOARD" = "atoms3u-4mb" ]; then
+            DEFAULTS="sdkconfig.defaults;sdkconfig.4mb;sdkconfig.atoms3u"
+          fi
+          idf.py -B build -DIDF_TARGET=esp32s3 -DPROJECT_VER="$VERSION" -DSDKCONFIG_DEFAULTS="$DEFAULTS" -DLIBREFIDO_PROFILE="$PROFILE" build
+          python tools/package_firmware.py --build-dir build --output-dir dist --board "$BOARD" --profile "$PROFILE" --version "$VERSION" --revision "$GITHUB_SHA"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.board }}-${{ matrix.profile }}
+          path: dist/*
+          if-no-files-found: error
+
+  tools:
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install build
+      - run: python -m build --wheel --outdir dist tools/librefido
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-tools
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    needs: [prepare, button-tests, firmware, tools]
+    if: github.ref == 'refs/heads/main' && needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums and draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, os, pathlib
+          root = pathlib.Path("dist")
+          version = os.environ["VERSION"]
+          expected = {f"librefido-{version}-{board}-{profile}-{suffix}" for board in ("esp32s3", "atoms3u-4mb") for profile in ("standard", "hardened") for suffix in ("app.bin", "full.bin", "parts.zip")}
+          expected.add(f"librefido_tools-{version}-py3-none-any.whl")
+          actual = {p.name for p in root.iterdir()}
+          assert actual == expected, (actual, expected)
+          (root / "SHA256SUMS").write_text("".join(f"{hashlib.sha256((root / name).read_bytes()).hexdigest()}  {name}\n" for name in sorted(expected)))
+          PY
+          if gh release view "v$VERSION" --json isDraft --jq '.isDraft' > existing-release.txt; then
+            test "$(cat existing-release.txt)" = "true"
+            gh release edit "v$VERSION" --target "$GITHUB_SHA" --title "LibreFido $VERSION" --notes-file "docs/releases/$VERSION.md"
+            gh release upload "v$VERSION" dist/* --clobber
+          else
+            gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "LibreFido $VERSION" --notes-file "docs/releases/$VERSION.md" --draft
+          fi
+      - name: Verify uploaded assets and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          gh release download "v$VERSION" --dir downloaded
+          python3 -c 'from pathlib import Path; assert {p.name for p in Path("dist").iterdir()} == {p.name for p in Path("downloaded").iterdir()}'
+          diff dist/SHA256SUMS downloaded/SHA256SUMS
+          (cd downloaded && sha256sum --check SHA256SUMS)
+          gh release edit "v$VERSION" --draft=false --latest
